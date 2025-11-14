@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: jetskiandmore-backend
+    env: python
+    plan: free
+
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -k uvicorn.workers.UvicornWorker app.main:app -b 0.0.0.0:$PORT
+
+    envVars:
+      # Runtime
+      - key: PYTHON_VERSION
+        value: 3.11
+
+      # MongoDB (external, e.g. MongoDB Atlas)
+      - key: JSM_MONGODB_URI
+        sync: false
+      - key: JSM_MONGODB_DB
+        value: jetskiandmore
+
+      # Email (Gmail SMTP or similar)
+      - key: JSM_GMAIL_USER
+        sync: false
+      - key: JSM_GMAIL_APP_PASSWORD
+        sync: false
+      - key: JSM_EMAIL_TO
+        sync: false
+      - key: JSM_EMAIL_FROM_NAME
+        value: "Jet Ski & More"
+
+      # Yoco payments
+      - key: JSM_YOCO_PUBLIC_KEY
+        sync: false
+      - key: JSM_YOCO_SECRET_KEY
+        sync: false
+      - key: JSM_YOCO_CHECKOUT_TOKEN
+        sync: false
+      - key: JSM_YOCO_CLIENT_ID
+        sync: false
+      - key: JSM_YOCO_CLIENT_SECRET
+        sync: false
+
+      # Frontend base URL (for links/callbacks)
+      - key: JSM_SITE_BASE_URL
+        sync: false
+
