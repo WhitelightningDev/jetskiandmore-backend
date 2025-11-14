@@ -1,7 +1,6 @@
 from pydantic_settings import BaseSettings
 from typing import List
 
-
 class Settings(BaseSettings):
     # CORS
     allowed_origins: List[str] = [
@@ -30,6 +29,11 @@ class Settings(BaseSettings):
     # Yoco OAuth (for new API incl. Payment Links)
     yoco_client_id: str | None = None
     yoco_client_secret: str | None = None
+
+    # Admin auth (for dashboard)
+    admin_email: str | None = None
+    admin_password: str | None = None
+    admin_jwt_secret: str = "change-me-in-prod"
 
     class Config:
         env_file = ".env"

@@ -1,5 +1,7 @@
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
 
 
 class ContactRequest(BaseModel):
@@ -102,3 +104,52 @@ class VerifyCheckoutResponse(BaseModel):
     checkoutId: str
     status: str
     paymentId: Optional[str] = None
+
+
+# --- Admin / dashboard schemas ---
+
+
+class AdminLoginRequest(BaseModel):
+    email: EmailStr
+    password: str
+
+
+class AdminLoginResponse(BaseModel):
+    token: str
+    tokenType: str = "bearer"
+
+
+class BookingAdminResponse(BaseModel):
+    id: str
+    rideId: str
+    date: Optional[str] = None
+    time: Optional[str] = None
+    fullName: str
+    email: EmailStr
+    phone: str
+    notes: Optional[str] = None
+    addons: Dict[str, Any] | None = None
+    status: str
+    amountInCents: int
+    paymentRef: Optional[str] = None
+    createdAt: Optional[datetime] = None
+
+
+class BookingUpdateRequest(BaseModel):
+    status: Optional[str] = None
+    date: Optional[str] = None
+    time: Optional[str] = None
+    notes: Optional[str] = None
+
+
+class RideAnalytics(BaseModel):
+    rideId: str
+    bookings: int
+    revenueInCents: int
+
+
+class AnalyticsSummaryResponse(BaseModel):
+    totalBookings: int
+    totalRevenueInCents: int
+    totalRevenueZar: float
+    rides: List[RideAnalytics]

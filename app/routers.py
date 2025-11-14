@@ -1,27 +1,45 @@
-from fastapi import APIRouter, HTTPException
-from .schemas import (
-    ContactRequest, ContactResponse,
-    BookingRequest, BookingResponse,
-    ChargeRequest, ChargeResponse,
-    PaymentQuoteRequest, PaymentQuoteResponse,
-    ChargeBookingRequest,
-    VerifyPaymentRequest, VerifyPaymentResponse,
-    VerifyPaymentByIdRequest, VerifyPaymentByIdResponse,
-    VerifyCheckoutRequest, VerifyCheckoutResponse,
-)
+from datetime import datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional
+
+import httpx
+import jwt
+from bson import ObjectId
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+
 from .config import settings
+from .db import book_slot, get_db, hold_slot, save_booking
 from .emailer import (
-    send_email,
-    format_contact_email,
     format_booking_email,
+    format_contact_email,
     format_payment_admin_email,
     format_payment_client_email,
+    send_email,
 )
-from .yoco import create_charge, YocoError, _get_oauth_token
-from .db import hold_slot, book_slot, save_booking
 from .pricing import compute_amount_cents
+from .schemas import (
+    AnalyticsSummaryResponse,
+    AdminLoginRequest,
+    AdminLoginResponse,
+    BookingAdminResponse,
+    BookingRequest,
+    BookingResponse,
+    BookingUpdateRequest,
+    ChargeBookingRequest,
+    ChargeRequest,
+    ChargeResponse,
+    ContactRequest,
+    ContactResponse,
+    PaymentQuoteRequest,
+    PaymentQuoteResponse,
+    VerifyCheckoutRequest,
+    VerifyCheckoutResponse,
+    VerifyPaymentByIdRequest,
+    VerifyPaymentByIdResponse,
+    VerifyPaymentRequest,
+    VerifyPaymentResponse,
+)
+from .yoco import YocoError, _get_oauth_token, create_charge
 import uuid
-import httpx
 from urllib.parse import urlencode
 
 
@@ -30,6 +48,46 @@ router = APIRouter(prefix="/api")
 # In-memory mapping from order_id -> booking dict for webhook/verification
 ORDER_BOOKINGS: dict[str, dict] = {}
 CHECKOUT_BOOKINGS: dict[str, dict] = {}
+
+
+# --- Admin auth helpers ---
+
+JWT_ALG = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+
+def _create_admin_token(subject: str) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": subject,
+        "iat": int(now.timestamp()),
+        "exp": int((now + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)).timestamp()),
+    }
+    return jwt.encode(payload, settings.admin_jwt_secret, algorithm=JWT_ALG)
+
+
+def _decode_admin_token(token: str) -> Dict[str, Any]:
+    try:
+        return jwt.decode(token, settings.admin_jwt_secret, algorithms=[JWT_ALG])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
+    except jwt.PyJWTError:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
+
+
+def get_current_admin(authorization: Optional[str] = Header(None)) -> str:
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid Authorization header",
+        )
+    token = authorization.split(" ", 1)[1].strip()
+    data = _decode_admin_token(token)
+    subject = data.get("sub")
+    expected = settings.admin_email or "admin"
+    if subject != expected:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid subject")
+    return subject
 
 
 @router.post("/contact", response_model=ContactResponse)
@@ -56,6 +114,160 @@ def bookings(req: BookingRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Email send failed: {e}")
     return BookingResponse(ok=True, id=str(uuid.uuid4()))
+
+
+# --- Admin: bookings CRUD & analytics ---
+
+
+def _serialize_booking(doc: Dict[str, Any]) -> BookingAdminResponse:
+    return BookingAdminResponse(
+        id=str(doc.get("_id")),
+        rideId=str(doc.get("rideId") or ""),
+        date=doc.get("date"),
+        time=doc.get("time"),
+        fullName=str(doc.get("fullName") or ""),
+        email=str(doc.get("email") or ""),
+        phone=str(doc.get("phone") or ""),
+        notes=doc.get("notes"),
+        addons=doc.get("addons") or None,
+        status=str(doc.get("status") or "unknown"),
+        amountInCents=int(doc.get("amountInCents") or 0),
+        paymentRef=doc.get("paymentRef"),
+        createdAt=doc.get("createdAt"),
+    )
+
+
+@router.get("/admin/bookings", response_model=List[BookingAdminResponse])
+def admin_list_bookings(
+    limit: int = 100,
+    skip: int = 0,
+    status_filter: Optional[str] = None,
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    query: Dict[str, Any] = {}
+    if status_filter:
+        query["status"] = status_filter
+    cursor = (
+        db.bookings.find(query)
+        .sort("createdAt", -1)
+        .skip(max(skip, 0))
+        .limit(max(limit, 1))
+    )
+    return [_serialize_booking(doc) for doc in cursor]
+
+
+@router.get("/admin/bookings/{booking_id}", response_model=BookingAdminResponse)
+def admin_get_booking(booking_id: str, admin: str = Depends(get_current_admin)):
+    db = get_db()
+    try:
+        oid = ObjectId(booking_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    doc = db.bookings.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return _serialize_booking(doc)
+
+
+@router.patch("/admin/bookings/{booking_id}", response_model=BookingAdminResponse)
+def admin_update_booking(
+    booking_id: str,
+    payload: BookingUpdateRequest,
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    try:
+        oid = ObjectId(booking_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    updates: Dict[str, Any] = {}
+    if payload.status is not None:
+        updates["status"] = payload.status
+    if payload.date is not None:
+        updates["date"] = payload.date
+    if payload.time is not None:
+        updates["time"] = payload.time
+    if payload.notes is not None:
+        updates["notes"] = payload.notes
+    if not updates:
+        doc = db.bookings.find_one({"_id": oid})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        return _serialize_booking(doc)
+    res = db.bookings.update_one({"_id": oid}, {"$set": updates})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    doc = db.bookings.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return _serialize_booking(doc)
+
+
+@router.delete("/admin/bookings/{booking_id}")
+def admin_delete_booking(booking_id: str, admin: str = Depends(get_current_admin)):
+    db = get_db()
+    try:
+        oid = ObjectId(booking_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    res = db.bookings.delete_one({"_id": oid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return {"ok": True}
+
+
+@router.get("/admin/analytics/summary", response_model=AnalyticsSummaryResponse)
+def admin_analytics_summary(admin: str = Depends(get_current_admin)):
+    db = get_db()
+    pipeline = [
+        {
+            "$group": {
+                "_id": "$rideId",
+                "bookings": {"$sum": 1},
+                "revenueInCents": {"$sum": {"$toInt": {"$ifNull": ["$amountInCents", 0]}}},
+            }
+        }
+    ]
+    try:
+        results = list(db.bookings.aggregate(pipeline))
+    except Exception:
+        results = []
+    rides = []
+    total_bookings = 0
+    total_revenue_cents = 0
+    for r in results:
+        ride_id = str(r.get("_id") or "")
+        bookings = int(r.get("bookings") or 0)
+        revenue_cents = int(r.get("revenueInCents") or 0)
+        total_bookings += bookings
+        total_revenue_cents += revenue_cents
+        rides.append(
+            {
+                "rideId": ride_id,
+                "bookings": bookings,
+                "revenueInCents": revenue_cents,
+            }
+        )
+    return AnalyticsSummaryResponse(
+        totalBookings=total_bookings,
+        totalRevenueInCents=total_revenue_cents,
+        totalRevenueZar=total_revenue_cents / 100.0,
+        rides=rides,
+    )
+
+
+# --- Admin: authentication ---
+
+
+@router.post("/admin/login", response_model=AdminLoginResponse)
+def admin_login(payload: AdminLoginRequest):
+    if not settings.admin_email or not settings.admin_password:
+        raise HTTPException(status_code=500, detail="Admin credentials not configured")
+    if payload.email != settings.admin_email or payload.password != settings.admin_password:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+    token = _create_admin_token(subject=settings.admin_email)
+    return AdminLoginResponse(token=token)
 
 
 @router.post("/payments/charge", response_model=ChargeResponse)

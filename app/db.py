@@ -1,13 +1,21 @@
-from pymongo import MongoClient, ASCENDING
-from pymongo.errors import DuplicateKeyError
 from datetime import datetime, timedelta
-from .config import settings
 import os
+from pathlib import Path
+
+from pymongo import ASCENDING, MongoClient
+from pymongo.errors import DuplicateKeyError
+
+from .config import settings
+
 try:
     from dotenv import load_dotenv
 except Exception:
     load_dotenv = None
-from pathlib import Path
+
+try:
+    import certifi  # type: ignore
+except Exception:
+    certifi = None  # type: ignore
 
 
 _client: MongoClient | None = None
@@ -33,7 +41,14 @@ def get_db():
             uri = os.getenv('MONGODB_URI')
         if not uri:
             raise RuntimeError('MONGODB_URI not configured')
-        _client = MongoClient(uri, tls=True)
+        client_kwargs = {"tls": True}
+        if certifi is not None:
+            try:
+                client_kwargs["tlsCAFile"] = certifi.where()
+            except Exception:
+                # If certifi is unavailable or misconfigured, fall back to default trust store.
+                pass
+        _client = MongoClient(uri, **client_kwargs)
         _init_indexes(_client)
     db_name = (
         settings.model_dump().get('mongodb_db')

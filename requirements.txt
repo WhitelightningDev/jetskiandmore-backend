@@ -27,4 +27,6 @@ uvloop==0.22.1
 watchfiles==1.1.1
 websockets==15.0.1
 pymongo[srv]==4.10.1
+certifi==2024.8.30
+PyJWT==2.10.1
 gunicorn
