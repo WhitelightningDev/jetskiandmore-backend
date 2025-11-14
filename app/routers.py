@@ -1,0 +1,477 @@
+from fastapi import APIRouter, HTTPException
+from .schemas import (
+    ContactRequest, ContactResponse,
+    BookingRequest, BookingResponse,
+    ChargeRequest, ChargeResponse,
+    PaymentQuoteRequest, PaymentQuoteResponse,
+    ChargeBookingRequest,
+    VerifyPaymentRequest, VerifyPaymentResponse,
+    VerifyPaymentByIdRequest, VerifyPaymentByIdResponse,
+    VerifyCheckoutRequest, VerifyCheckoutResponse,
+)
+from .config import settings
+from .emailer import (
+    send_email,
+    format_contact_email,
+    format_booking_email,
+    format_payment_admin_email,
+    format_payment_client_email,
+)
+from .yoco import create_charge, YocoError, _get_oauth_token
+from .db import hold_slot, book_slot, save_booking
+from .pricing import compute_amount_cents
+import uuid
+import httpx
+from urllib.parse import urlencode
+
+
+router = APIRouter(prefix="/api")
+
+# In-memory mapping from order_id -> booking dict for webhook/verification
+ORDER_BOOKINGS: dict[str, dict] = {}
+CHECKOUT_BOOKINGS: dict[str, dict] = {}
+
+
+@router.post("/contact", response_model=ContactResponse)
+def contact(req: ContactRequest):
+    if not settings.email_to:
+        raise HTTPException(status_code=500, detail="Email recipient not configured")
+    # Send to admin; set Reply-To to user
+    body = format_contact_email(req.model_dump())
+    try:
+        send_email(subject="New contact message", body=body, to_address=settings.email_to, reply_to=req.email)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Email send failed: {e}")
+    return ContactResponse(ok=True, id=str(uuid.uuid4()))
+
+
+@router.post("/bookings", response_model=BookingResponse)
+def bookings(req: BookingRequest):
+    if not settings.email_to:
+        raise HTTPException(status_code=500, detail="Email recipient not configured")
+    # Send booking request email to admin; Reply-To to user
+    body = format_booking_email(req.model_dump())
+    try:
+        send_email(subject="New booking request", body=body, to_address=settings.email_to, reply_to=req.email)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Email send failed: {e}")
+    return BookingResponse(ok=True, id=str(uuid.uuid4()))
+
+
+@router.post("/payments/charge", response_model=ChargeResponse)
+def payments_charge(req: ChargeBookingRequest):
+    # Compute authoritative amount server-side
+    amount = compute_amount_cents(req.booking.rideId, req.booking.addons.model_dump())
+    try:
+        raw = create_charge(
+            token=req.token,
+            amount=amount,
+            currency='ZAR',
+            email=req.booking.email,
+            reference=f"{req.booking.rideId}-{req.booking.date or ''}-{req.booking.time or ''}",
+        )
+    except YocoError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    charge_id = str(raw.get("id") or raw.get("chargeId") or "unknown")
+    status = str(raw.get("status") or raw.get("outcome") or "unknown")
+
+    # Best-effort email notifications on success
+    try:
+        success = status.lower() in ("successful", "succeeded", "paid", "approved", "captured") or raw.get("success") is True
+        if success and settings.email_to:
+            # Admin email
+            admin_body = format_payment_admin_email(req.booking.model_dump(), amount, charge_id, status)
+            send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=req.booking.email)
+            # Client email
+            client_body = format_payment_client_email(req.booking.model_dump(), amount, charge_id)
+            send_email(subject="Booking confirmed — payment received", body=client_body, to_address=req.booking.email)
+    except Exception:
+        # Do not fail the charge response if emails fail
+        pass
+    # Persist booking + finalize slot
+    try:
+        book_slot(req.booking.rideId, req.booking.date, req.booking.time)
+        save_booking(req.booking.model_dump(), amount, charge_id, status='approved' if success else status)
+    except Exception:
+        pass
+
+    return ChargeResponse(ok=True, id=charge_id, status=status, raw=raw)
+
+
+@router.post("/payments/quote", response_model=PaymentQuoteResponse)
+def payments_quote(req: PaymentQuoteRequest):
+    amount = compute_amount_cents(req.rideId, req.addons.model_dump())
+    return PaymentQuoteResponse(amountInCents=amount)
+
+
+@router.get("/payments/config")
+def payments_config():
+    if not settings.yoco_public_key:
+        raise HTTPException(status_code=500, detail="Yoco public key not configured")
+    return {"publicKey": settings.yoco_public_key, "currency": "ZAR"}
+
+
+@router.post("/payments/initiate")
+def payments_initiate(req: ChargeBookingRequest):
+    # Accepts booking + placeholder token ignored; returns authoritative payment info for the UI
+    amount = compute_amount_cents(req.booking.rideId, req.booking.addons.model_dump())
+    if not settings.yoco_public_key:
+        raise HTTPException(status_code=500, detail="Yoco public key not configured")
+    # Soft-hold the slot to avoid races during payment (expires via TTL). Ignore DB errors.
+    if req.booking.date and req.booking.time:
+        try:
+            ok = hold_slot(req.booking.rideId, req.booking.date, req.booking.time)
+            if ok is False:
+                raise HTTPException(status_code=409, detail="Selected time slot is no longer available")
+        except Exception:
+            # If DB is unavailable, proceed without holding to avoid 500s.
+            pass
+    reference = f"{req.booking.rideId}-{req.booking.date or ''}-{req.booking.time or ''}"
+    return {"currency": "ZAR", "amountInCents": amount, "publicKey": settings.yoco_public_key, "reference": reference}
+
+
+def _site_base() -> str:
+    if settings.site_base_url:
+        return settings.site_base_url.rstrip('/')
+    if settings.allowed_origins:
+        return str(settings.allowed_origins[0]).rstrip('/')
+    return "http://localhost:5173"
+
+
+@router.post("/payments/checkout")
+def payments_checkout(req: ChargeBookingRequest):
+    # Build a hosted checkout session via Yoco Checkout API
+    amount = compute_amount_cents(req.booking.rideId, req.booking.addons.model_dump())
+    token = settings.yoco_checkout_token or settings.yoco_secret_key
+    if not token:
+        raise HTTPException(status_code=500, detail="Yoco checkout token not configured")
+    if req.booking.date and req.booking.time:
+        try:
+            ok = hold_slot(req.booking.rideId, req.booking.date, req.booking.time)
+            if ok is False:
+                raise HTTPException(status_code=409, detail="Selected time slot is no longer available")
+        except Exception:
+            pass
+
+    base = _site_base()
+    # Append a hint param for result handling
+    payload = {
+        "amount": int(amount),
+        "currency": "ZAR",
+        # Dedicated result pages
+        "successUrl": f"{base}/payments/success",
+        "cancelUrl": f"{base}/payments/cancelled",
+        "failureUrl": f"{base}/payments/failed",
+        "metadata": {
+            "rideId": req.booking.rideId,
+            "date": req.booking.date,
+            "time": req.booking.time,
+            "name": req.booking.fullName,
+            "email": req.booking.email,
+            "phone": req.booking.phone,
+        },
+    }
+
+    try:
+        r = httpx.post(
+            "https://payments.yoco.com/api/checkouts",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Network error contacting Yoco: {e}")
+
+    if r.status_code >= 400:
+        try:
+            err = r.json()
+        except Exception:
+            err = {"error": r.text}
+        raise HTTPException(status_code=400, detail=f"Yoco checkout failed: {err}")
+
+    data = r.json()
+    checkout_id = str(data.get("id") or "")
+    if checkout_id:
+        try:
+            CHECKOUT_BOOKINGS[checkout_id] = req.booking.model_dump()
+        except Exception:
+            pass
+    return {"ok": True, "id": checkout_id, "redirectUrl": data.get("redirectUrl"), "raw": data}
+
+
+@router.post("/payments/verify-checkout", response_model=VerifyCheckoutResponse)
+def payments_verify_checkout(req: VerifyCheckoutRequest):
+    token = settings.yoco_checkout_token or settings.yoco_secret_key
+    if not token:
+        raise HTTPException(status_code=500, detail="Yoco checkout token not configured")
+    checkout_id = req.checkoutId
+    try:
+        r = httpx.get(
+            f"https://payments.yoco.com/api/checkouts/{checkout_id}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Network error contacting Yoco: {e}")
+
+    if r.status_code >= 400:
+        try:
+            err = r.json()
+        except Exception:
+            err = {"error": r.text}
+        raise HTTPException(status_code=400, detail=f"Yoco checkout verify failed: {err}")
+
+    data = r.json()
+    status = str(data.get("status") or "").lower() or "pending"
+    payment_id = data.get("paymentId") or data.get("payment_id")
+
+    # If completed, send emails immediately using booking context (no OAuth required)
+    if status == "completed":
+        try:
+            booking = req.booking.model_dump()
+            amount = compute_amount_cents(booking.get("rideId"), (booking.get("addons") or {}))
+            charge_id = str(payment_id or checkout_id)
+            # Persist booking and finalize slot
+            try:
+                book_slot(booking.get('rideId'), booking.get('date'), booking.get('time'))
+                save_booking(booking, amount, charge_id, status='approved')
+            except Exception:
+                pass
+            if settings.email_to:
+                admin_body = format_payment_admin_email(booking, amount, charge_id, "approved")
+                send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=booking.get("email"))
+            client_body = format_payment_client_email(booking, amount, charge_id)
+            send_email(subject="Booking confirmed — payment received", body=client_body, to_address=booking.get("email"))
+        except Exception:
+            pass
+
+    return VerifyCheckoutResponse(ok=(status == "completed"), checkoutId=checkout_id, status=status, paymentId=payment_id)
+
+
+@router.post("/payments/link")
+def payments_link(req: ChargeBookingRequest):
+    # Create a hosted Yoco Payment Link for this booking
+    amount = compute_amount_cents(req.booking.rideId, req.booking.addons.model_dump())
+    if not settings.yoco_client_id or not settings.yoco_client_secret:
+        raise HTTPException(status_code=500, detail="Yoco OAuth not configured. Set JSM_YOCO_CLIENT_ID and JSM_YOCO_CLIENT_SECRET")
+    if req.booking.date and req.booking.time:
+        try:
+            ok = hold_slot(req.booking.rideId, req.booking.date, req.booking.time)
+            if ok is False:
+                raise HTTPException(status_code=409, detail="Selected time slot is no longer available")
+        except Exception:
+            pass
+
+    # Construct human-friendly reference/description
+    reference = f"{req.booking.rideId}-{req.booking.date or ''}-{req.booking.time or ''}"
+    customer_ref = (req.booking.fullName or "Customer").strip()[:100]
+    description = (reference or "").strip()[:255]
+
+    payload = {
+        "amount": {"amount": int(amount), "currency": "ZAR"},
+        "customer_reference": customer_ref,
+        "customer_description": description,
+    }
+
+    try:
+        token = _get_oauth_token("business/payment-links:write")
+        r = httpx.post(
+            "https://api.yoco.com/v1/payment_links/",
+            json=payload,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            timeout=30,
+        )
+    except YocoError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Network error contacting Yoco: {e}")
+
+    if r.status_code >= 400:
+        try:
+            err = r.json()
+        except Exception:
+            err = {"error": r.text}
+        raise HTTPException(status_code=400, detail=f"Yoco link failed: {err}")
+
+    data = r.json()
+    # Try common url fields
+    link_url = (
+        data.get("short_url")
+        or data.get("url")
+        or data.get("redirect_url")
+        or data.get("payment_page_url")
+        or data.get("payment_link")
+        or ""
+    )
+    order_id = data.get("order_id") or data.get("orderId")
+    # Store booking context mapped by order for webhook / verify
+    if order_id:
+        try:
+            ORDER_BOOKINGS[order_id] = req.booking.model_dump()
+        except Exception:
+            pass
+    return {"ok": True, "linkUrl": link_url, "id": data.get("id") or data.get("payment_link_id"), "orderId": order_id, "raw": data}
+
+
+@router.post("/payments/verify", response_model=VerifyPaymentResponse)
+def payments_verify(req: VerifyPaymentRequest):
+    if not settings.yoco_client_id or not settings.yoco_client_secret:
+        raise HTTPException(status_code=500, detail="Yoco OAuth not configured. Set JSM_YOCO_CLIENT_ID and JSM_YOCO_CLIENT_SECRET")
+    order_id = req.orderId
+    # Stash latest booking context
+    try:
+        ORDER_BOOKINGS[order_id] = req.booking.model_dump()
+    except Exception:
+        pass
+
+    # Fetch order and check payments
+    try:
+        token = _get_oauth_token("business/orders:read")
+        resp = httpx.get(
+            f"https://api.yoco.com/v1/orders/{order_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+    except YocoError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Network error contacting Yoco: {e}")
+
+    if resp.status_code >= 400:
+        try:
+            err = resp.json()
+        except Exception:
+            err = {"error": resp.text}
+        raise HTTPException(status_code=400, detail=f"Yoco verify failed: {err}")
+
+    order = resp.json()
+    payments = order.get("payments") or []
+    status = "pending"
+    for p in payments:
+        st = str(p.get("status") or "").lower()
+        if st in ("approved", "captured", "succeeded", "successful"):
+            status = "approved"
+            break
+        elif st in ("failed", "cancelled"):
+            status = st
+
+    # On approved, send emails
+    if status == "approved" and settings.email_to:
+        try:
+            booking = ORDER_BOOKINGS.get(order_id) or req.booking.model_dump()
+            amount = compute_amount_cents(booking.get("rideId"), (booking.get("addons") or {}))
+            charge_id = payments[0].get("id") if payments else order.get("id") or order_id
+            # Persist booking and finalize slot
+            try:
+                book_slot(booking.get('rideId'), booking.get('date'), booking.get('time'))
+                save_booking(booking, amount, charge_id, status='approved')
+            except Exception:
+                pass
+            admin_body = format_payment_admin_email(booking, amount, charge_id, status)
+            send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=booking.get("email"))
+            client_body = format_payment_client_email(booking, amount, charge_id)
+            send_email(subject="Booking confirmed — payment received", body=client_body, to_address=booking.get("email"))
+        except Exception:
+            pass
+
+    return VerifyPaymentResponse(ok=(status == "approved"), orderId=order_id, status=status)
+
+
+@router.post("/payments/webhook/yoco")
+def payments_webhook(payload: dict):
+    """Best-effort webhook receiver for Yoco events.
+    In production, verify signatures if provided by Yoco.
+    """
+    # Try extract order/payment identifiers
+    order_id = (
+        payload.get("order_id")
+        or payload.get("orderId")
+        or (payload.get("payment") or {}).get("order_id")
+        or (payload.get("data") or {}).get("order_id")
+    )
+    payment_id = (
+        payload.get("payment_id")
+        or payload.get("paymentId")
+        or (payload.get("payment") or {}).get("id")
+    )
+    # If we have an order id, reuse verify flow
+    if order_id:
+        try:
+            booking = ORDER_BOOKINGS.get(order_id)
+            if booking:
+                req = VerifyPaymentRequest(orderId=str(order_id), booking=BookingRequest(**booking))
+                return payments_verify(req)
+        except Exception:
+            pass
+    # Fallback: resolve from payment id to order, if available
+    if payment_id:
+        try:
+            token = _get_oauth_token("business/orders:read")
+            pr = httpx.get(
+                f"https://api.yoco.com/v1/payments/{payment_id}",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=30,
+            )
+            if pr.status_code < 400:
+                p = pr.json()
+                oid = p.get("order_id")
+                if oid:
+                    booking = ORDER_BOOKINGS.get(oid)
+                    if booking:
+                        req = VerifyPaymentRequest(orderId=str(oid), booking=BookingRequest(**booking))
+                        return payments_verify(req)
+        except Exception:
+            pass
+    # Acknowledge webhook
+    return {"ok": True}
+
+
+@router.post("/payments/verify-by-payment", response_model=VerifyPaymentByIdResponse)
+def payments_verify_by_payment(req: VerifyPaymentByIdRequest):
+    if not settings.yoco_client_id or not settings.yoco_client_secret:
+        raise HTTPException(status_code=500, detail="Yoco OAuth not configured. Set JSM_YOCO_CLIENT_ID and JSM_YOCO_CLIENT_SECRET")
+    payment_id = req.paymentId
+    try:
+        token = _get_oauth_token("business/orders:read")
+        pr = httpx.get(
+            f"https://api.yoco.com/v1/payments/{payment_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=30,
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(status_code=502, detail=f"Network error contacting Yoco: {e}")
+
+    if pr.status_code >= 400:
+        try:
+            err = pr.json()
+        except Exception:
+            err = {"error": pr.text}
+        raise HTTPException(status_code=400, detail=f"Yoco verify failed: {err}")
+
+    p = pr.json()
+    order_id = p.get("order_id")
+    status = str(p.get("status") or "").lower() or "pending"
+
+    # Stash booking under order id for emails
+    try:
+        if order_id:
+            ORDER_BOOKINGS[order_id] = req.booking.model_dump()
+    except Exception:
+        pass
+
+    # Delegate to existing verify if we have an order id to trigger emails
+    if order_id:
+        return payments_verify(VerifyPaymentRequest(orderId=str(order_id), booking=req.booking))
+
+    return VerifyPaymentByIdResponse(ok=(status == "approved"), paymentId=payment_id, orderId=None, status=status)
