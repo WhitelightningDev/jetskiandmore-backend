@@ -117,28 +117,125 @@ def bookings(req: BookingRequest):
     return BookingResponse(ok=True, id=str(uuid.uuid4()))
 
 
+DAY_START_MINUTES = 8 * 60   # 08:00
+DAY_END_MINUTES = 17 * 60    # 17:00
+TIMESLOT_STEP_MINUTES = 15   # candidate granularity
+BOOKING_BUFFER_MINUTES = 10  # buffer before & after each booking
+
+
+def _ride_duration_minutes(db, ride_id: str) -> int:
+    duration: Optional[int] = None
+    try:
+        ride = db.rides.find_one({"id": ride_id}, {"durationMinutes": 1})
+        if ride is not None:
+            d = ride.get("durationMinutes")
+            if isinstance(d, int) and d > 0:
+                duration = d
+    except Exception:
+        duration = None
+    if duration is not None:
+        return duration
+    # Fallback mapping aligned with DEFAULT_RIDES in seed.py
+    if ride_id in ("30-1", "30-2"):
+        return 30
+    if ride_id in ("60-1", "60-2"):
+        return 60
+    if ride_id == "joy":
+        return 10
+    if ride_id == "group":
+        return 150
+    return 30
+
+
+def _parse_time_str_to_minutes(s: Any) -> Optional[int]:
+    if not isinstance(s, str):
+        return None
+    try:
+        hh, mm = map(int, s.split(":", 1))
+        if 0 <= hh < 24 and 0 <= mm < 60:
+            return hh * 60 + mm
+    except Exception:
+        return None
+    return None
+
+
 @router.get("/timeslots", response_model=TimeslotAvailabilityResponse)
 def timeslots(rideId: str, date: str):
     if not rideId or not date:
         raise HTTPException(status_code=400, detail="rideId and date are required")
+    # Basic date validation (expects YYYY-MM-DD)
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format, expected YYYY-MM-DD")
+
     db = get_db()
-    cursor = (
-        db.timeslots.find(
+    duration = _ride_duration_minutes(db, rideId)
+    buffer = BOOKING_BUFFER_MINUTES
+
+    # Collect blocked intervals in minutes since midnight, expanded by buffer on both sides
+    blocked: List[tuple[int, int]] = []
+
+    # From timeslots collection: holds + booked
+    try:
+        slot_cursor = db.timeslots.find(
+            {"rideId": rideId, "date": date, "status": {"$in": ["hold", "booked"]}},
+            {"time": 1, "_id": 0},
+        )
+        for doc in slot_cursor:
+            m = _parse_time_str_to_minutes(doc.get("time"))
+            if m is None:
+                continue
+            start = m
+            start_block = max(0, start - buffer)
+            end_block = min(24 * 60, start + duration + buffer)
+            blocked.append((start_block, end_block))
+    except Exception:
+        blocked = []
+
+    # From bookings collection (in case timeslots missed a record)
+    try:
+        booking_cursor = db.bookings.find(
             {
                 "rideId": rideId,
                 "date": date,
-                "status": "open",
+                "status": {"$in": ["approved", "processing", "created"]},
             },
             {"time": 1, "_id": 0},
         )
-        .sort("time", 1)
-    )
-    times: List[str] = []
-    for doc in cursor:
-        t = doc.get("time")
-        if isinstance(t, str) and t:
-            times.append(t)
-    return TimeslotAvailabilityResponse(rideId=rideId, date=date, times=times)
+        for doc in booking_cursor:
+            m = _parse_time_str_to_minutes(doc.get("time"))
+            if m is None:
+                continue
+            start = m
+            start_block = max(0, start - buffer)
+            end_block = min(24 * 60, start + duration + buffer)
+            blocked.append((start_block, end_block))
+    except Exception:
+        pass
+
+    # Generate candidate start times within the operating window
+    available: List[str] = []
+    latest_start = DAY_END_MINUTES - duration
+    step = TIMESLOT_STEP_MINUTES
+
+    t = DAY_START_MINUTES
+    while t <= latest_start:
+        candidate_start = t
+        candidate_end = t + duration
+        conflict = False
+        for b_start, b_end in blocked:
+            # Overlap check between [candidate_start, candidate_end) and [b_start, b_end)
+            if not (candidate_end <= b_start or candidate_start >= b_end):
+                conflict = True
+                break
+        if not conflict:
+            hh = candidate_start // 60
+            mm = candidate_start % 60
+            available.append(f"{hh:02d}:{mm:02d}")
+        t += step
+
+    return TimeslotAvailabilityResponse(rideId=rideId, date=date, times=available)
 
 
 # --- Admin: bookings CRUD & analytics ---
