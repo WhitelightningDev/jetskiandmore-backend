@@ -468,9 +468,19 @@ def payments_initiate(req: ChargeBookingRequest):
 
 def _site_base() -> str:
     if settings.site_base_url:
-        return settings.site_base_url.rstrip('/')
+        return settings.site_base_url.rstrip("/")
+    # Prefer a non-localhost origin if configured
     if settings.allowed_origins:
-        return str(settings.allowed_origins[0]).rstrip('/')
+        for origin in settings.allowed_origins:
+            o = str(origin or "").strip()
+            if not o:
+                continue
+            if o.startswith("http://localhost") or o.startswith("http://127.0.0.1"):
+                continue
+            return o.rstrip("/")
+        # Fallback: first origin, even if local, for explicit setups
+        return str(settings.allowed_origins[0]).rstrip("/")
+    # Hard-coded live frontend as final fallback
     return "https://jetskiandmore-frontend.vercel.app"
 
 
@@ -567,8 +577,11 @@ def payments_verify_checkout(req: VerifyCheckoutRequest):
     status = str(data.get("status") or "").lower() or "pending"
     payment_id = data.get("paymentId") or data.get("payment_id")
 
-    # If completed, send emails immediately using booking context (no OAuth required)
-    if status == "completed":
+    success_states = {"completed", "approved", "captured", "succeeded", "successful", "paid"}
+    is_success = status in success_states
+
+    # On success, send emails immediately using booking context (no OAuth required)
+    if is_success:
         try:
             booking = req.booking.model_dump()
             amount = compute_amount_cents(booking.get("rideId"), (booking.get("addons") or {}))
@@ -587,7 +600,7 @@ def payments_verify_checkout(req: VerifyCheckoutRequest):
         except Exception:
             pass
 
-    return VerifyCheckoutResponse(ok=(status == "completed"), checkoutId=checkout_id, status=status, paymentId=payment_id)
+    return VerifyCheckoutResponse(ok=is_success, checkoutId=checkout_id, status=status, paymentId=payment_id)
 
 
 @router.post("/payments/link")
