@@ -106,6 +106,12 @@ class VerifyCheckoutResponse(BaseModel):
     paymentId: Optional[str] = None
 
 
+class TimeslotAvailabilityResponse(BaseModel):
+    rideId: str
+    date: str
+    times: List[str]
+
+
 # --- Admin / dashboard schemas ---
 
 

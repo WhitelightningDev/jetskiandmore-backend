@@ -31,6 +31,7 @@ from .schemas import (
     ContactResponse,
     PaymentQuoteRequest,
     PaymentQuoteResponse,
+    TimeslotAvailabilityResponse,
     VerifyCheckoutRequest,
     VerifyCheckoutResponse,
     VerifyPaymentByIdRequest,
@@ -114,6 +115,30 @@ def bookings(req: BookingRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Email send failed: {e}")
     return BookingResponse(ok=True, id=str(uuid.uuid4()))
+
+
+@router.get("/timeslots", response_model=TimeslotAvailabilityResponse)
+def timeslots(rideId: str, date: str):
+    if not rideId or not date:
+        raise HTTPException(status_code=400, detail="rideId and date are required")
+    db = get_db()
+    cursor = (
+        db.timeslots.find(
+            {
+                "rideId": rideId,
+                "date": date,
+                "status": "open",
+            },
+            {"time": 1, "_id": 0},
+        )
+        .sort("time", 1)
+    )
+    times: List[str] = []
+    for doc in cursor:
+        t = doc.get("time")
+        if isinstance(t, str) and t:
+            times.append(t)
+    return TimeslotAvailabilityResponse(rideId=rideId, date=date, times=times)
 
 
 # --- Admin: bookings CRUD & analytics ---
