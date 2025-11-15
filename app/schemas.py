@@ -25,6 +25,10 @@ class Addons(BaseModel):
     extraPeople: int = 0
 
 
+class Passenger(BaseModel):
+    name: str
+
+
 class BookingRequest(BaseModel):
     rideId: str
     date: Optional[str] = None  # ISO date string (YYYY-MM-DD)
@@ -34,6 +38,7 @@ class BookingRequest(BaseModel):
     phone: str
     notes: Optional[str] = None
     addons: Addons
+    passengers: Optional[List[Passenger]] = None
 
 
 class BookingResponse(BaseModel):
@@ -139,6 +144,7 @@ class BookingAdminResponse(BaseModel):
     amountInCents: int
     paymentRef: Optional[str] = None
     createdAt: Optional[datetime] = None
+    passengers: Optional[List[Dict[str, Any]]] = None
 
 
 class BookingUpdateRequest(BaseModel):
@@ -146,6 +152,7 @@ class BookingUpdateRequest(BaseModel):
     date: Optional[str] = None
     time: Optional[str] = None
     notes: Optional[str] = None
+    message: Optional[str] = None
 
 
 class RideAnalytics(BaseModel):

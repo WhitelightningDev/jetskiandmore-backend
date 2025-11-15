@@ -252,6 +252,7 @@ def _serialize_booking(doc: Dict[str, Any]) -> BookingAdminResponse:
         phone=str(doc.get("phone") or ""),
         notes=doc.get("notes"),
         addons=doc.get("addons") or None,
+        passengers=doc.get("passengers") or None,
         status=str(doc.get("status") or "unknown"),
         amountInCents=int(doc.get("amountInCents") or 0),
         paymentRef=doc.get("paymentRef"),
@@ -317,12 +318,36 @@ def admin_update_booking(
         if not doc:
             raise HTTPException(status_code=404, detail="Booking not found")
         return _serialize_booking(doc)
+
     res = db.bookings.update_one({"_id": oid}, {"$set": updates})
     if res.matched_count == 0:
         raise HTTPException(status_code=404, detail="Booking not found")
     doc = db.bookings.find_one({"_id": oid})
     if not doc:
         raise HTTPException(status_code=404, detail="Booking not found")
+
+    # If status changed and we have a message + customer email, notify client
+    try:
+        if payload.status is not None and payload.message:
+            try:
+                from .emailer import format_booking_status_update_email
+            except Exception:
+                format_booking_status_update_email = None  # type: ignore
+            if format_booking_status_update_email is not None:
+                body = format_booking_status_update_email(
+                    _serialize_booking(doc).model_dump(),
+                    payload.status,
+                    payload.message,
+                )
+                send_email(
+                    subject=f"Booking update — {payload.status}",
+                    body=body,
+                    to_address=str(doc.get("email") or ""),
+                )
+    except Exception:
+        # Do not break admin flow if email fails
+        pass
+
     return _serialize_booking(doc)
 
 

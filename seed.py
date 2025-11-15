@@ -208,6 +208,10 @@ def bookings_schema() -> Dict[str, Any]:
             "phone": {"bsonType": ["string", "null"]},
             "notes": {"bsonType": ["string", "null"]},
             "addons": {"bsonType": ["object", "null"]},
+            "passengers": {
+                "bsonType": ["array", "null"],
+                "items": {"bsonType": "object"},
+            },
             "status": {"bsonType": "string"},
             "amountInCents": {"bsonType": "int"},
             "paymentRef": {"bsonType": ["string", "null"]},
