@@ -82,18 +82,37 @@ def slot_key(ride_id: str, date: str | None, time_str: str | None) -> str:
 def hold_slot(ride_id: str, date: str | None, time_str: str | None, minutes: int = 20) -> bool:
     db = get_db()
     key = slot_key(ride_id, date, time_str)
+    now = datetime.utcnow()
+    hold_until = now + timedelta(minutes=max(1, minutes))
     doc = {
         'rideId': ride_id,
         'date': date,
         'time': time_str,
         'key': key,
         'status': 'hold',
-        'holdUntil': datetime.utcnow() + timedelta(minutes=max(1, minutes)),
-        'createdAt': datetime.utcnow(),
+        'holdUntil': hold_until,
+        'createdAt': now,
     }
     try:
-        db.timeslots.insert_one(doc)
-        return True
+        # Convert existing "open"/"hold" slots to a hold, or create a new one.
+        # If the slot is already booked, treat as unavailable.
+        res = db.timeslots.update_one(
+            {'key': key, 'status': {'$ne': 'booked'}},
+            {
+                '$set': {
+                    'rideId': ride_id,
+                    'date': date,
+                    'time': time_str,
+                    'status': 'hold',
+                    'holdUntil': hold_until,
+                },
+                '$setOnInsert': {'createdAt': now},
+            },
+            upsert=True,
+        )
+        if res.matched_count or res.upserted_id:
+            return True
+        return False
     except DuplicateKeyError:
         return False
 

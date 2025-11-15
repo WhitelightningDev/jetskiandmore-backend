@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Seed a MongoDB database with users and orders using pymongo and python-dotenv.
+Seed a MongoDB database with demo data (users, orders, rides, pricing, timeslots, bookings)
+using pymongo and python-dotenv.
 
 Quick start:
-  python seed.py --fresh --verbose
+  python seed.py --fresh --seed-rides --seed-timeslots --timeslot-days 7 --verbose
 
 Environment (.env example):
   # Connection string (SRV or standard)
@@ -54,7 +55,7 @@ def jlog(level: str, message: str, **fields: Any) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Seed MongoDB with users and orders")
+    p = argparse.ArgumentParser(description="Seed MongoDB with demo data (users, orders, rides, pricing, timeslots, bookings)")
     p.add_argument("--fresh", action="store_true", help="Drop the database before seeding")
     p.add_argument(
         "--drop-collections",
@@ -125,6 +126,13 @@ def ensure_indexes(db) -> None:
     db.rides.create_index([("id", ASCENDING)], unique=True, name="uniq_ride_id")
     # Pricing indexes
     db.pricing.create_index([("key", ASCENDING)], unique=True, name="uniq_pricing_key")
+    # Bookings indexes
+    db.bookings.create_index([("email", ASCENDING)], name="idx_email")
+    db.bookings.create_index([("date", ASCENDING)], name="idx_date")
+    db.bookings.create_index(
+        [("rideId", ASCENDING), ("date", ASCENDING), ("time", ASCENDING)],
+        name="idx_ride_date_time",
+    )
     # Timeslots indexes
     db.timeslots.create_index([("key", ASCENDING)], unique=True, name="uniq_slot_key")
     # TTL on holdUntil to auto-expire holds (0s after holdUntil)
@@ -182,6 +190,28 @@ def rides_schema() -> Dict[str, Any]:
             "priceZar": {"bsonType": "int"},
             "durationMinutes": {"bsonType": ["int", "null"]},
             "updatedAt": {"bsonType": ["date", "null"]},
+        },
+        "additionalProperties": True,
+    }
+
+
+def bookings_schema() -> Dict[str, Any]:
+    return {
+        "bsonType": "object",
+        "required": ["rideId", "fullName", "email", "status", "amountInCents", "createdAt"],
+        "properties": {
+            "rideId": {"bsonType": "string"},
+            "date": {"bsonType": ["string", "null"], "description": "YYYY-MM-DD"},
+            "time": {"bsonType": ["string", "null"], "description": "HH:MM"},
+            "fullName": {"bsonType": "string"},
+            "email": {"bsonType": "string", "pattern": "@"},
+            "phone": {"bsonType": ["string", "null"]},
+            "notes": {"bsonType": ["string", "null"]},
+            "addons": {"bsonType": ["object", "null"]},
+            "status": {"bsonType": "string"},
+            "amountInCents": {"bsonType": "int"},
+            "paymentRef": {"bsonType": ["string", "null"]},
+            "createdAt": {"bsonType": "date"},
         },
         "additionalProperties": True,
     }
@@ -411,7 +441,7 @@ def main() -> int:
             return 2
 
     if args.drop_collections and not args.fresh:
-        drop_collections(db, ["users", "orders", "rides", "pricing", "timeslots"])
+        drop_collections(db, ["users", "orders", "rides", "pricing", "timeslots", "bookings"])
 
     # Ensure validators
     ensure_collection_with_validator(db, "users", users_schema())
@@ -419,6 +449,7 @@ def main() -> int:
     ensure_collection_with_validator(db, "rides", rides_schema())
     ensure_collection_with_validator(db, "pricing", pricing_schema())
     ensure_collection_with_validator(db, "timeslots", timeslots_schema())
+    ensure_collection_with_validator(db, "bookings", bookings_schema())
 
     # Indexes
     ensure_indexes(db)
@@ -433,7 +464,7 @@ def main() -> int:
         new_slots = seed_timeslots(db, args.timeslot_days, args.timeslot_start, args.timeslot_end, args.timeslot_interval, verbose=args.verbose)
 
     # Summary
-    summary_cols = ["users", "orders", "rides", "pricing", "timeslots"]
+    summary_cols = ["users", "orders", "rides", "pricing", "timeslots", "bookings"]
     summary = {
         "db": db_name,
         "collections": {name: (db[name].count_documents({}) if name in db.list_collection_names() else 0) for name in summary_cols},

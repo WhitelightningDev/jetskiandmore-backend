@@ -349,7 +349,7 @@ def _site_base() -> str:
         return settings.site_base_url.rstrip('/')
     if settings.allowed_origins:
         return str(settings.allowed_origins[0]).rstrip('/')
-    return "http://localhost:5173"
+    return "https://jetskiandmore-frontend.vercel.app"
 
 
 @router.post("/payments/checkout")
