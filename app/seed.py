@@ -39,6 +39,42 @@ DEFAULT_RIDES = [
         "durationMinutes": 60,
     },
     {
+        "id": "30-3",
+        "title": "30‑min Rental (3 Jet‑Skis)",
+        "priceZar": 4500,
+        "durationMinutes": 30,
+    },
+    {
+        "id": "60-3",
+        "title": "60‑min Rental (3 Jet‑Skis)",
+        "priceZar": 6900,
+        "durationMinutes": 60,
+    },
+    {
+        "id": "30-4",
+        "title": "30‑min Rental (4 Jet‑Skis)",
+        "priceZar": 5800,
+        "durationMinutes": 30,
+    },
+    {
+        "id": "60-4",
+        "title": "60‑min Rental (4 Jet‑Skis)",
+        "priceZar": 9000,
+        "durationMinutes": 60,
+    },
+    {
+        "id": "30-5",
+        "title": "30‑min Rental (5 Jet‑Skis)",
+        "priceZar": 7100,
+        "durationMinutes": 30,
+    },
+    {
+        "id": "60-5",
+        "title": "60‑min Rental (5 Jet‑Skis)",
+        "priceZar": 11000,
+        "durationMinutes": 60,
+    },
+    {
         "id": "joy",
         "title": "Joy Ride (Instructed) • 10 min",
         "priceZar": 700,

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Optional
+import re
 try:
     from .db import get_db
 except Exception:
@@ -11,6 +12,12 @@ RIDES_ZAR = {
     '60-1': 2600,
     '30-2': 3100,
     '60-2': 4800,
+    '30-3': 4500,
+    '60-3': 6900,
+    '30-4': 5800,
+    '60-4': 9000,
+    '30-5': 7100,
+    '60-5': 11000,
     'joy': 700,
     'group': 7500,
 }
@@ -33,6 +40,15 @@ class Addons:
 
 
 def max_extra_people(ride_id: str) -> int:
+    if ride_id in ('joy', 'group'):
+        return 0
+    match = re.match(r'^(?:30|60)-(\d+)$', ride_id)
+    if match:
+        try:
+            skis = int(match.group(1))
+            return max(0, min(5, skis))
+        except Exception:
+            return 0
     if ride_id in ('30-1', '60-1'):
         return 1
     if ride_id in ('30-2', '60-2'):

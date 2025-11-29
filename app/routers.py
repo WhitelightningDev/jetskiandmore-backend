@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 import httpx
+import re
 import jwt
 from bson import ObjectId
 from fastapi import APIRouter, Depends, Header, HTTPException, status
@@ -136,9 +137,9 @@ def _ride_duration_minutes(db, ride_id: str) -> int:
     if duration is not None:
         return duration
     # Fallback mapping aligned with DEFAULT_RIDES in seed.py
-    if ride_id in ("30-1", "30-2"):
+    if re.match(r"^30-\d+$", ride_id):
         return 30
-    if ride_id in ("60-1", "60-2"):
+    if re.match(r"^60-\d+$", ride_id):
         return 60
     if ride_id == "joy":
         return 10
