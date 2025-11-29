@@ -166,3 +166,39 @@ class AnalyticsSummaryResponse(BaseModel):
     totalRevenueInCents: int
     totalRevenueZar: float
     rides: List[RideAnalytics]
+
+
+# --- Interim skipper quiz ---
+
+
+class InterimSkipperQuizAnswers(BaseModel):
+    q1_distance_from_shore: str
+    q2_kill_switch: str
+    q3_what_to_wear: str
+    q4_kill_switch_connection: str
+    q5_harbour_passing_rule: str
+    q6_harbour_rules: List[str]
+    q7_max_distance: str
+    q8_connect_kill_switch_two_places: List[str]
+    q9_deposit_loss_reasons: List[str]
+    q10_emergency_items_onboard: List[str]
+
+
+class InterimSkipperQuizRequest(BaseModel):
+    email: EmailStr
+    name: str
+    surname: str
+    idNumber: str
+    passengerName: Optional[str] = None
+    passengerSurname: Optional[str] = None
+    passengerEmail: Optional[EmailStr] = None
+    passengerIdNumber: Optional[str] = None
+    hasWatchedTutorial: bool
+    hasAcceptedIndemnity: bool
+    quizAnswers: InterimSkipperQuizAnswers
+
+
+class InterimSkipperQuizResponse(BaseModel):
+    success: bool = True
+    ok: bool
+    id: str

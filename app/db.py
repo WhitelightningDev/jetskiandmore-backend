@@ -73,6 +73,9 @@ def _init_indexes(client: MongoClient):
     db.rides.create_index([('id', ASCENDING)], unique=True, name='uniq_ride_id')
     # Pricing config doc
     db.pricing.create_index([('key', ASCENDING)], unique=True, name='uniq_pricing_key')
+    # Interim skipper quiz submissions
+    db.interim_skipper_quiz_submission.create_index([('email', ASCENDING)], name='idx_quiz_email')
+    db.interim_skipper_quiz_submission.create_index([('created_at', ASCENDING)], name='idx_quiz_created_at')
 
 
 def slot_key(ride_id: str, date: str | None, time_str: str | None) -> str:

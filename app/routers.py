@@ -30,6 +30,8 @@ from .schemas import (
     ChargeResponse,
     ContactRequest,
     ContactResponse,
+    InterimSkipperQuizRequest,
+    InterimSkipperQuizResponse,
     PaymentQuoteRequest,
     PaymentQuoteResponse,
     TimeslotAvailabilityResponse,
@@ -103,6 +105,69 @@ def contact(req: ContactRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Email send failed: {e}")
     return ContactResponse(ok=True, id=str(uuid.uuid4()))
+
+
+@router.post("/interim-skipper-quiz", response_model=InterimSkipperQuizResponse)
+def interim_skipper_quiz(req: InterimSkipperQuizRequest):
+    errors: list[str] = []
+    text_fields = [
+        ("email", req.email),
+        ("name", req.name),
+        ("surname", req.surname),
+        ("idNumber", req.idNumber),
+    ]
+    for key, value in text_fields:
+        if not str(value).strip():
+            errors.append(f"{key} is required")
+
+    if not req.hasWatchedTutorial:
+        errors.append("hasWatchedTutorial must be true")
+    if not req.hasAcceptedIndemnity:
+        errors.append("hasAcceptedIndemnity must be true")
+
+    quiz = req.quizAnswers
+    quiz_fields = [
+        ("q1_distance_from_shore", quiz.q1_distance_from_shore),
+        ("q2_kill_switch", quiz.q2_kill_switch),
+        ("q3_what_to_wear", quiz.q3_what_to_wear),
+        ("q4_kill_switch_connection", quiz.q4_kill_switch_connection),
+        ("q5_harbour_passing_rule", quiz.q5_harbour_passing_rule),
+        ("q7_max_distance", quiz.q7_max_distance),
+    ]
+    for key, value in quiz_fields:
+        if not str(value).strip():
+            errors.append(f"{key} is required")
+
+    list_quiz_fields = [
+        ("q6_harbour_rules", quiz.q6_harbour_rules),
+        ("q8_connect_kill_switch_two_places", quiz.q8_connect_kill_switch_two_places),
+        ("q9_deposit_loss_reasons", quiz.q9_deposit_loss_reasons),
+        ("q10_emergency_items_onboard", quiz.q10_emergency_items_onboard),
+    ]
+    for key, value in list_quiz_fields:
+        if not value or len(value) == 0:
+            errors.append(f"{key} must have at least one selection")
+
+    if errors:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=errors)
+
+    db = get_db()
+    doc = {
+        "email": req.email,
+        "name": req.name,
+        "surname": req.surname,
+        "id_number": req.idNumber,
+        "passenger_name": req.passengerName.strip() if req.passengerName else None,
+        "passenger_surname": req.passengerSurname.strip() if req.passengerSurname else None,
+        "passenger_email": str(req.passengerEmail).strip() if req.passengerEmail else None,
+        "passenger_id_number": req.passengerIdNumber.strip() if req.passengerIdNumber else None,
+        "has_watched_tutorial": req.hasWatchedTutorial,
+        "has_accepted_indemnity": req.hasAcceptedIndemnity,
+        "quiz_answers": req.quizAnswers.model_dump(),
+        "created_at": datetime.utcnow(),
+    }
+    res = db.interim_skipper_quiz_submission.insert_one(doc)
+    return InterimSkipperQuizResponse(ok=True, success=True, id=str(res.inserted_id))
 
 
 @router.post("/bookings", response_model=BookingResponse)
