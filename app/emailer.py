@@ -6,6 +6,24 @@ import certifi
 import re
 from .config import settings
 
+SAFETY_VIDEO_URL = "https://www.youtube.com/watch?v=5bZ37Hf82B0&t=11s"
+INDEMNITY_FORM_URL = "https://forms.gle/paenRq6yLNXjjqYo9"
+
+RIDE_LABELS = {
+    '30-1': '30‑min Rental (1 Jet‑Ski)',
+    '60-1': '60‑min Rental (1 Jet‑Ski)',
+    '30-2': '30‑min Rental (2 Jet‑Skis)',
+    '60-2': '60‑min Rental (2 Jet‑Skis)',
+    '30-3': '30‑min Rental (3 Jet‑Skis)',
+    '60-3': '60‑min Rental (3 Jet‑Skis)',
+    '30-4': '30‑min Rental (4 Jet‑Skis)',
+    '60-4': '60‑min Rental (4 Jet‑Skis)',
+    '30-5': '30‑min Rental (5 Jet‑Skis)',
+    '60-5': '60‑min Rental (5 Jet‑Skis)',
+    'joy': 'Joy Ride (Instructed) • 10 min',
+    'group': 'Group Session • 2 hr 30 min',
+}
+
 
 def _smtp_client():
     if not settings.gmail_user or not settings.gmail_app_password:
@@ -56,45 +74,169 @@ def send_email(subject: str, body: str, to_address: str, reply_to: str | None = 
             pass
 
 
+def _brand_name() -> str:
+    return settings.email_from_name or "Jet Ski & More"
+
+
+def _ride_label(ride_id: str | None, include_code: bool = False) -> str:
+    ride_id = ride_id or "-"
+    label = RIDE_LABELS.get(ride_id, ride_id)
+    if include_code:
+        return f"{label} ({ride_id})"
+    return label
+
+
+def _yesno(v: bool) -> str:
+    return "Yes" if bool(v) else "No"
+
+
+def _extract_passenger_names(raw_passengers) -> list[str]:
+    names: list[str] = []
+    for p in raw_passengers or []:
+        if isinstance(p, dict):
+            name = str(p.get("name") or "").strip()
+        else:
+            name = str(p or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _info_table(rows: list[tuple[str, str]], label_width: int = 170) -> str:
+    row_html = "".join(
+        f"<tr><td style=\"padding:6px 0;font-size:14px;color:#6b7280;width:{label_width}px;\">{label}</td>"
+        f"<td style=\"padding:6px 0;font-size:14px;color:#0f172a;\">{value}</td></tr>"
+        for label, value in rows
+    )
+    return (
+        f"<table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" "
+        f"style=\"border-collapse:collapse;margin:4px 0 4px 0;\">{row_html}</table>"
+    )
+
+
+def _addons_table(addons: dict, label_width: int = 170) -> str:
+    a = addons or {}
+    boat_has = a.get("boat")
+    try:
+        boat_count = max(1, int(a.get("boatCount") or 1))
+    except Exception:
+        boat_count = 1
+    boat_value = f"{_yesno(boat_has)}{f' ({boat_count})' if boat_has else ''}".strip()
+    try:
+        extra_people = int(a.get("extraPeople") or 0)
+    except Exception:
+        extra_people = 0
+    rows = [
+        ("Drone footage", _yesno(a.get("drone"))),
+        ("GoPro", _yesno(a.get("gopro"))),
+        ("Wetsuit", _yesno(a.get("wetsuit"))),
+        ("Boat passengers", boat_value),
+        ("Extra people", str(extra_people)),
+    ]
+    return _info_table(rows, label_width=label_width)
+
+
+def _passengers_block(raw_passengers, empty_message: str = "Passengers: none specified.") -> str:
+    passenger_names = _extract_passenger_names(raw_passengers)
+    if passenger_names:
+        items = "".join(f"<li style='margin:2px 0;'>{name}</li>" for name in passenger_names)
+        return (
+            "<div style=\"margin:12px 0 0 0;\">"
+            "<div style=\"font-size:13px;color:#6b7280;margin-bottom:6px;\">Passengers</div>"
+            f"<ul style=\"margin:0;padding-left:18px;font-size:14px;color:#0f172a;\">{items}</ul>"
+            "</div>"
+        )
+    return f"<div style=\"margin:12px 0 0 0;font-size:13px;color:#6b7280;\">{empty_message}</div>"
+
+
+def _safety_section() -> str:
+    return f"""
+      <div style="margin:16px 0 0 0;padding:14px 16px;background:#fff7ed;border:1px solid #fdba74;border-radius:12px;">
+        <div style="font-size:13px;font-weight:700;color:#9a3412;letter-spacing:0.02em;text-transform:uppercase;">Safety first</div>
+        <p style="margin:8px 0 10px 0;color:#7c2d12;font-size:14px;line-height:1.55;">
+          Please watch the safety briefing video and complete the indemnity form before you arrive.
+          This is mandatory for all riders so we can check you in quickly on the day.
+        </p>
+        <div style="margin-top:6px;">
+          <a href="{SAFETY_VIDEO_URL}" target="_blank" rel="noreferrer" style="display:inline-block;margin:0 10px 8px 0;padding:12px 14px;background:#0ea5e9;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;">Watch safety video</a>
+          <a href="{INDEMNITY_FORM_URL}" target="_blank" rel="noreferrer" style="display:inline-block;margin:0 0 8px 0;padding:12px 14px;color:#0ea5e9;text-decoration:none;border-radius:8px;border:1px solid #0ea5e9;font-weight:700;">Complete indemnity form</a>
+        </div>
+        <div style="margin-top:6px;font-size:13px;font-weight:700;color:#9a3412;">Required: please finish both steps.</div>
+      </div>
+    """
+
+
+def _wrap_user_email(
+    title: str,
+    hero: str,
+    body_html: str,
+    preheader: str = "",
+    footer_note: str = "Reply to this email if you need any changes.",
+    accent_color: str = "#0ea5e9",
+) -> str:
+    brand = _brand_name()
+    preheader_html = (
+        f"<div style=\"display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;\">{preheader}</div>"
+        if preheader
+        else ""
+    )
+    return f"""
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>{title} — {brand}</title>
+      </head>
+      <body style="margin:0;padding:0;background:#0b172a;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#0f172a;">
+        {preheader_html}
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:linear-gradient(140deg,#0b172a,#0f172a);padding:24px 14px;">
+          <tr>
+            <td align="center">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:700px;background:#ffffff;border:1px solid #e5e7eb;border-radius:16px;overflow:hidden;box-shadow:0 18px 60px rgba(12,40,74,0.18);">
+                <tr>
+                  <td style="background:{accent_color};color:#ffffff;padding:18px 22px;font-weight:700;font-size:18px;letter-spacing:0.01em;border-bottom:1px solid rgba(255,255,255,0.16);">
+                    {hero}
+                    <div style="margin-top:4px;font-size:13px;opacity:0.92;font-weight:500;">{brand}</div>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:22px 24px;">
+                    {body_html}
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:14px 22px;background:#f8fafc;border-top:1px solid #e5e7eb;color:#6b7280;font-size:12px;">
+                    {footer_note}
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+    """
+
+
 def format_booking_email(data: dict) -> str:
     ts = time.strftime('%Y-%m-%d %H:%M:%S')
-    brand = settings.email_from_name or "Jet Ski & More"
-
-    def ride_label(ride_id: str | None) -> str:
-        labels = {
-            '30-1': '30‑min Rental (1 Jet‑Ski)',
-            '60-1': '60‑min Rental (1 Jet‑Ski)',
-            '30-2': '30‑min Rental (2 Jet‑Skis)',
-            '60-2': '60‑min Rental (2 Jet‑Skis)',
-            '30-3': '30‑min Rental (3 Jet‑Skis)',
-            '60-3': '60‑min Rental (3 Jet‑Skis)',
-            '30-4': '30‑min Rental (4 Jet‑Skis)',
-            '60-4': '60‑min Rental (4 Jet‑Skis)',
-            '30-5': '30‑min Rental (5 Jet‑Skis)',
-            '60-5': '60‑min Rental (5 Jet‑Skis)',
-            'joy': 'Joy Ride (Instructed) • 10 min',
-            'group': 'Group Session • 2 hr 30 min',
-        }
-        ride_id = ride_id or '-'
-        return f"{labels.get(ride_id, ride_id)} ({ride_id})"
-
-    def yesno(v: bool) -> str:
-        return 'Yes' if bool(v) else 'No'
+    brand = _brand_name()
 
     a = data.get('addons') or {}
     addons_html = f"""
       <table role=\"presentation\" width=\"100%\" cellspacing=\"0\" cellpadding=\"0\" style=\"border-collapse:collapse;margin:6px 0 0 0;\">
         <tr>
           <td style=\"padding:4px 0;font-size:14px;color:#6b7280;width:180px;\">Drone footage</td>
-          <td style=\"padding:4px 0;font-size:14px;color:#111827;\">{yesno(a.get('drone'))}</td>
+          <td style=\"padding:4px 0;font-size:14px;color:#111827;\">{_yesno(a.get('drone'))}</td>
         </tr>
         <tr>
           <td style=\"padding:4px 0;font-size:14px;color:#6b7280;\">GoPro</td>
-          <td style=\"padding:4px 0;font-size:14px;color:#111827;\">{yesno(a.get('gopro'))}</td>
+          <td style=\"padding:4px 0;font-size:14px;color:#111827;\">{_yesno(a.get('gopro'))}</td>
         </tr>
         <tr>
           <td style=\"padding:4px 0;font-size:14px;color:#6b7280;\">Wetsuit</td>
-          <td style=\"padding:4px 0;font-size:14px;color:#111827;\">{yesno(a.get('wetsuit'))}</td>
+          <td style=\"padding:4px 0;font-size:14px;color:#111827;\">{_yesno(a.get('wetsuit'))}</td>
         </tr>
         <tr>
           <td style=\"padding:4px 0;font-size:14px;color:#6b7280;\">Boat passengers</td>
@@ -167,7 +309,7 @@ def format_booking_email(data: dict) -> str:
                         </tr>
                         <tr>
                           <td style=\"padding:6px 0;font-size:14px;color:#6b7280;\">Ride</td>
-                          <td style=\"padding:6px 0;font-size:14px;color:#111827;\">{ride_label(data.get('rideId'))}</td>
+                          <td style=\"padding:6px 0;font-size:14px;color:#111827;\">{_ride_label(data.get('rideId'), include_code=True)}</td>
                         </tr>
                         <tr>
                           <td style=\"padding:6px 0;font-size:14px;color:#6b7280;\">Date</td>
@@ -292,33 +434,14 @@ def format_contact_email(data: dict) -> str:
 
 
 def format_payment_admin_email(booking: dict, amount_in_cents: int, charge_id: str, status: str) -> str:
-    brand = settings.email_from_name or "Jet Ski & More"
+    brand = _brand_name()
     amount_num = int(amount_in_cents) // 100
     amount = f"ZAR {amount_num:,}".replace(',', ' ')
-    def ride_label(ride_id: str | None) -> str:
-        labels = {
-            '30-1': '30‑min Rental (1 Jet‑Ski)',
-            '60-1': '60‑min Rental (1 Jet‑Ski)',
-            '30-2': '30‑min Rental (2 Jet‑Skis)',
-            '60-2': '60‑min Rental (2 Jet‑Skis)',
-            '30-3': '30‑min Rental (3 Jet‑Skis)',
-            '60-3': '60‑min Rental (3 Jet‑Skis)',
-            '30-4': '30‑min Rental (4 Jet‑Skis)',
-            '60-4': '60‑min Rental (4 Jet‑Skis)',
-            '30-5': '30‑min Rental (5 Jet‑Skis)',
-            '60-5': '60‑min Rental (5 Jet‑Skis)',
-            'joy': 'Joy Ride (Instructed) • 10 min',
-            'group': 'Group Session • 2 hr 30 min',
-        }
-        ride_id = ride_id or '-'
-        return f"{labels.get(ride_id, ride_id)} ({ride_id})"
-    def yesno(v: bool) -> str:
-        return 'Yes' if bool(v) else 'No'
     a = booking.get('addons') or {}
     addons_rows = f"""
-      <tr><td style='padding:4px 0;color:#6b7280;width:180px'>Drone footage</td><td style='padding:4px 0;color:#111827'>{yesno(a.get('drone'))}</td></tr>
-      <tr><td style='padding:4px 0;color:#6b7280'>GoPro</td><td style='padding:4px 0;color:#111827'>{yesno(a.get('gopro'))}</td></tr>
-      <tr><td style='padding:4px 0;color:#6b7280'>Wetsuit</td><td style='padding:4px 0;color:#111827'>{yesno(a.get('wetsuit'))}</td></tr>
+      <tr><td style='padding:4px 0;color:#6b7280;width:180px'>Drone footage</td><td style='padding:4px 0;color:#111827'>{_yesno(a.get('drone'))}</td></tr>
+      <tr><td style='padding:4px 0;color:#6b7280'>GoPro</td><td style='padding:4px 0;color:#111827'>{_yesno(a.get('gopro'))}</td></tr>
+      <tr><td style='padding:4px 0;color:#6b7280'>Wetsuit</td><td style='padding:4px 0;color:#111827'>{_yesno(a.get('wetsuit'))}</td></tr>
       <tr><td style='padding:4px 0;color:#6b7280'>Boat passengers</td><td style='padding:4px 0;color:#111827'>{('%s (%s)' % (('Yes' if a.get('boat') else 'No'), ('%d' % max(1, int(a.get('boatCount') or 1))) if a.get('boat') else '')).strip()}</td></tr>
       <tr><td style='padding:4px 0;color:#6b7280'>Extra people</td><td style='padding:4px 0;color:#111827'>{int(a.get('extraPeople') or 0)}</td></tr>
     """
@@ -357,7 +480,7 @@ def format_payment_admin_email(booking: dict, amount_in_cents: int, charge_id: s
             <div style="margin:0 0 10px 0;">
               <div style="font-size:13px;color:#6b7280;margin-bottom:4px;">Session</div>
               <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:4px 0 8px 0;">
-                <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;width:180px;">Ride</td><td style="padding:6px 0;font-size:14px;color:#111827;">{ride_label(booking.get('rideId'))}</td></tr>
+                <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;width:180px;">Ride</td><td style="padding:6px 0;font-size:14px;color:#111827;">{_ride_label(booking.get('rideId'), include_code=True)}</td></tr>
                 <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;">Date</td><td style="padding:6px 0;font-size:14px;color:#111827;">{booking.get('date') or '-'}</td></tr>
                 <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;">Time</td><td style="padding:6px 0;font-size:14px;color:#111827;">{booking.get('time') or '-'}</td></tr>
               </table>
@@ -390,169 +513,97 @@ def format_payment_admin_email(booking: dict, amount_in_cents: int, charge_id: s
 
 
 def format_payment_client_email(booking: dict, amount_in_cents: int, charge_id: str) -> str:
-    brand = settings.email_from_name or "Jet Ski & More"
+    brand = _brand_name()
     amount_num = int(amount_in_cents) // 100
     amount = f"ZAR {amount_num:,}".replace(',', ' ')
-    def ride_label(ride_id: str | None) -> str:
-        labels = {
-            '30-1': '30‑min Rental (1 Jet‑Ski)',
-            '60-1': '60‑min Rental (1 Jet‑Ski)',
-            '30-2': '30‑min Rental (2 Jet‑Skis)',
-            '60-2': '60‑min Rental (2 Jet‑Skis)',
-            '30-3': '30‑min Rental (3 Jet‑Skis)',
-            '60-3': '60‑min Rental (3 Jet‑Skis)',
-            '30-4': '30‑min Rental (4 Jet‑Skis)',
-            '60-4': '60‑min Rental (4 Jet‑Skis)',
-            '30-5': '30‑min Rental (5 Jet‑Skis)',
-            '60-5': '60‑min Rental (5 Jet‑Skis)',
-            'joy': 'Joy Ride (Instructed) • 10 min',
-            'group': 'Group Session • 2 hr 30 min',
-        }
-        ride_id = ride_id or '-'
-        return labels.get(ride_id, ride_id)
-    def yesno(v: bool) -> str:
-        return 'Yes' if bool(v) else 'No'
-    a = booking.get('addons') or {}
-    addons_rows = f"""
-      <tr><td style='padding:4px 0;color:#6b7280;width:160px'>Drone footage</td><td style='padding:4px 0;color:#111827'>{yesno(a.get('drone'))}</td></tr>
-      <tr><td style='padding:4px 0;color:#6b7280'>GoPro</td><td style='padding:4px 0;color:#111827'>{yesno(a.get('gopro'))}</td></tr>
-      <tr><td style='padding:4px 0;color:#6b7280'>Wetsuit</td><td style='padding:4px 0;color:#111827'>{yesno(a.get('wetsuit'))}</td></tr>
-      <tr><td style='padding:4px 0;color:#6b7280'>Boat passengers</td><td style='padding:4px 0;color:#111827'>{('%s (%s)' % (('Yes' if a.get('boat') else 'No'), ('%d' % max(1, int(a.get('boatCount') or 1))) if a.get('boat') else '')).strip()}</td></tr>
-      <tr><td style='padding:4px 0;color:#6b7280'>Extra people</td><td style='padding:4px 0;color:#111827'>{int(a.get('extraPeople') or 0)}</td></tr>
+    session_rows = [
+        ("Ride", _ride_label(booking.get('rideId'))),
+        ("Date", booking.get('date') or '-'),
+        ("Time", booking.get('time') or '-'),
+        ("Amount", amount),
+        ("Payment reference", charge_id),
+    ]
+    passengers_html = _passengers_block(booking.get('passengers') or [], "Passengers: none added yet.")
+    addons_html = _addons_table(booking.get('addons') or {}, label_width=170)
+    body_html = f"""
+        <p style="margin:0 0 12px 0;color:#0f172a;font-size:15px;line-height:1.6;">
+          Thanks for booking with {brand}! We have received your payment of <strong>{amount}</strong>.
+          Your spot is being held and we'll confirm availability shortly.
+        </p>
+        <div style="margin:14px 0 0 0;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+          <div style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:700;color:#0f172a;">Booking overview</div>
+          <div style="padding:14px 16px;">
+            {_info_table(session_rows, label_width=170)}
+          </div>
+        </div>
+        {passengers_html}
+        <div style="margin:14px 0 0 0;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+          <div style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:700;color:#0f172a;">Add-ons</div>
+          <div style="padding:14px 16px;">
+            {addons_html}
+          </div>
+        </div>
+        {_safety_section()}
+        <p style="margin:14px 0 0 0;color:#0f172a;font-size:14px;line-height:1.6;">
+          If anything needs to change, just reply to this email and we'll help. We look forward to getting you on the water!
+        </p>
     """
-    # Passengers
-    raw_passengers = booking.get('passengers') or []
-    passenger_names: list[str] = []
-    for p in raw_passengers:
-        if isinstance(p, dict):
-            name = str(p.get('name') or '').strip()
-        else:
-            name = str(p or '').strip()
-        if name:
-            passenger_names.append(name)
-    if passenger_names:
-        passengers_html = """
-            <div style="margin:10px 0 12px 0;">
-              <div style="font-size:13px;color:#6b7280;margin-bottom:6px;">Passengers</div>
-              <ul style="margin:0;padding-left:18px;font-size:14px;color:#111827;">
-        """ + "".join(
-            f"<li>Passenger {idx + 1}: {name}</li>" for idx, name in enumerate(passenger_names)
-        ) + "</ul></div>"
-    else:
-        passengers_html = """
-            <div style="margin:10px 0 12px 0;font-size:13px;color:#6b7280;">
-              Passengers: none specified.
-            </div>
-        """
-    html = f"""
-    <!DOCTYPE html>
-    <html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width, initial-scale=1'/><title>Booking confirmed — {brand}</title></head>
-    <body style="margin:0;padding:0;background:#f6f7f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
-      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f7f9;padding:24px;"><tr><td align="center">
-        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
-          <tr><td style="background:#0ea5e9;color:#ffffff;padding:16px 20px;font-weight:600;font-size:16px;">Thank you — payment received</td></tr>
-          <tr><td style="padding:20px;">
-            <p style='margin:0 0 10px 0;color:#374151;'>We\'ve received your payment of <strong>{amount}</strong>.</p>
-            <div style="margin:0 0 10px 0;">
-              <div style="font-size:13px;color:#6b7280;margin-bottom:4px;">Your session</div>
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:4px 0 8px 0;">
-                <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;width:160px;">Ride</td><td style="padding:6px 0;font-size:14px;color:#111827;">{ride_label(booking.get('rideId'))}</td></tr>
-                <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;">Date</td><td style="padding:6px 0;font-size:14px;color:#111827;">{booking.get('date') or '-'}</td></tr>
-                <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;">Time</td><td style="padding:6px 0;font-size:14px;color:#111827;">{booking.get('time') or '-'}</td></tr>
-              </table>
-            </div>
-            {passengers_html}
-            <div style="margin:10px 0 12px 0;">
-              <div style="font-size:13px;color:#6b7280;margin-bottom:6px;">Add-ons</div>
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;">{addons_rows}</table>
-            </div>
-            <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:12px 0 0 0;">
-              <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;width:160px;">Payment reference</td><td style="padding:6px 0;font-size:14px;color:#111827;">{charge_id}</td></tr>
-            </table>
-            <p style='margin:12px 0 0 0;color:#374151;'>We\'ll confirm availability shortly and get you riding. If you have any questions, simply reply to this email.</p>
-          </td></tr>
-          <tr><td style="padding:14px 20px;background:#f9fafb;border-top:1px solid #e5e7eb;color:#6b7280;font-size:12px;">This email was sent automatically after your payment.</td></tr>
-        </table>
-      </td></tr></table>
-    </body></html>
-    """
-    return html
+    return _wrap_user_email(
+        title="Booking confirmed",
+        hero="Booking confirmed — payment received",
+        body_html=body_html,
+        preheader=f"Payment received for your {brand} booking. Watch the safety video and complete the indemnity form before arrival.",
+        footer_note="This email was sent automatically after your payment. Reply if you need any changes.",
+    )
 
 
 def format_booking_status_update_email(booking: dict, new_status: str, message: str) -> str:
-    brand = settings.email_from_name or "Jet Ski & More"
-    status_label = new_status.capitalize()
+    brand = _brand_name()
+    status_label = (new_status or "updated").replace("_", " ").title()
+    accent_color = {
+        "approved": "#10b981",
+        "confirmed": "#0f766e",
+        "paid": "#0ea5e9",
+        "cancelled": "#ef4444",
+        "canceled": "#ef4444",
+    }.get((new_status or "").lower(), "#0ea5e9")
 
-    def ride_label(ride_id: str | None) -> str:
-        labels = {
-            '30-1': '30‑min Rental (1 Jet‑Ski)',
-            '60-1': '60‑min Rental (1 Jet‑Ski)',
-            '30-2': '30‑min Rental (2 Jet‑Skis)',
-            '60-2': '60‑min Rental (2 Jet‑Skis)',
-            '30-3': '30‑min Rental (3 Jet‑Skis)',
-            '60-3': '60‑min Rental (3 Jet‑Skis)',
-            '30-4': '30‑min Rental (4 Jet‑Skis)',
-            '60-4': '60‑min Rental (4 Jet‑Skis)',
-            '30-5': '30‑min Rental (5 Jet‑Skis)',
-            '60-5': '60‑min Rental (5 Jet‑Skis)',
-            'joy': 'Joy Ride (Instructed) • 10 min',
-            'group': 'Group Session • 2 hr 30 min',
-        }
-        ride_id = ride_id or '-'
-        return labels.get(ride_id, ride_id)
-
-    raw_passengers = booking.get("passengers") or []
-    passenger_names: list[str] = []
-    for p in raw_passengers:
-        if isinstance(p, dict):
-            name = str(p.get("name") or "").strip()
-        else:
-            name = str(p or "").strip()
-        if name:
-            passenger_names.append(name)
-    if passenger_names:
-        passengers_html = """
-            <div style="margin:10px 0 12px 0;">
-              <div style="font-size:13px;color:#6b7280;margin-bottom:6px;">Passengers</div>
-              <ul style="margin:0;padding-left:18px;font-size:14px;color:#111827;">
-        """ + "".join(
-            f"<li>Passenger {idx + 1}: {name}</li>" for idx, name in enumerate(passenger_names)
-        ) + "</ul></div>"
-    else:
-        passengers_html = """
-            <div style="margin:10px 0 12px 0;font-size:13px;color:#6b7280;">
-              Passengers: none specified.
-            </div>
-        """
-
-    html = f"""
-    <!DOCTYPE html>
-    <html><head><meta charset='utf-8'/><meta name='viewport' content='width=device-width, initial-scale=1'/><title>Booking update — {brand}</title></head>
-    <body style="margin:0;padding:0;background:#f6f7f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
-      <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f7f9;padding:24px;"><tr><td align="center">
-        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
-          <tr><td style="background:#0f766e;color:#ffffff;padding:16px 20px;font-weight:600;font-size:16px;">Booking update — {status_label}</td></tr>
-          <tr><td style="padding:20px;">
-            <p style='margin:0 0 10px 0;color:#374151;'>We&apos;ve updated the status of your booking.</p>
-            <div style="margin:0 0 10px 0;">
-              <div style="font-size:13px;color:#6b7280;margin-bottom:4px;">Session</div>
-              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;margin:4px 0 8px 0;">
-                <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;width:160px;">Ride</td><td style="padding:6px 0;font-size:14px;color:#111827;">{ride_label(booking.get('rideId'))}</td></tr>
-                <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;">Date</td><td style="padding:6px 0;font-size:14px;color:#111827;">{booking.get('date') or '-'}</td></tr>
-                <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;">Time</td><td style="padding:6px 0;font-size:14px;color:#111827;">{booking.get('time') or '-'}</td></tr>
-                <tr><td style="padding:6px 0;font-size:14px;color:#6b7280;">New status</td><td style="padding:6px 0;font-size:14px;color:#111827;">{status_label}</td></tr>
-              </table>
-            </div>
-            {passengers_html}
-            <div style="margin-top:12px;padding:12px 14px;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;">
-              <div style="font-size:13px;color:#6b7280;margin-bottom:6px;">Message from the team</div>
-              <div style="white-space:pre-wrap;font-size:15px;color:#111827;">{message}</div>
-            </div>
-            <p style='margin:12px 0 0 0;color:#374151;'>If you have any questions, simply reply to this email.</p>
-          </td></tr>
-          <tr><td style="padding:14px 20px;background:#f9fafb;border-top:1px solid #e5e7eb;color:#6b7280;font-size:12px;">This email was sent automatically when your booking status changed.</td></tr>
-        </table>
-      </td></tr></table>
-    </body></html>
+    session_rows = [
+        ("Ride", _ride_label(booking.get('rideId'))),
+        ("Date", booking.get('date') or '-'),
+        ("Time", booking.get('time') or '-'),
+        ("Status", status_label),
+    ]
+    passengers_html = _passengers_block(booking.get("passengers") or [], "Passengers: none added yet.")
+    message_block = f"""
+      <div style="margin:14px 0 0 0;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+        <div style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:700;color:#0f172a;">Message from the team</div>
+        <div style="padding:14px 16px;">
+          <div style="white-space:pre-wrap;font-size:14px;color:#0f172a;line-height:1.6;">{message or 'No extra message provided.'}</div>
+        </div>
+      </div>
     """
-    return html
+    body_html = f"""
+        <p style="margin:0 0 12px 0;color:#0f172a;font-size:15px;line-height:1.6;">
+          We updated your booking status to <strong>{status_label}</strong>.
+        </p>
+        <div style="display:inline-block;padding:6px 10px;margin:0 0 12px 0;background:#e0f2fe;color:#075985;border-radius:999px;font-size:12px;font-weight:700;letter-spacing:0.02em;text-transform:uppercase;">{status_label}</div>
+        <div style="margin:8px 0 0 0;border:1px solid #e5e7eb;border-radius:12px;overflow:hidden;">
+          <div style="padding:12px 14px;background:#f8fafc;border-bottom:1px solid #e5e7eb;font-size:13px;font-weight:700;color:#0f172a;">Booking details</div>
+          <div style="padding:14px 16px;">
+            {_info_table(session_rows, label_width=170)}
+          </div>
+        </div>
+        {passengers_html}
+        {message_block}
+        {_safety_section()}
+        <p style="margin:14px 0 0 0;color:#0f172a;font-size:14px;line-height:1.6;">Reply if you have any questions or updates.</p>
+    """
+    return _wrap_user_email(
+        title="Booking update",
+        hero=f"Booking update — {status_label}",
+        body_html=body_html,
+        preheader=f"Your {brand} booking is now {status_label.lower()}. Watch the safety video and complete indemnity inside.",
+        footer_note="This email was sent automatically when your booking status changed.",
+        accent_color=accent_color,
+    )
