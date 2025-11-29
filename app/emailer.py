@@ -7,7 +7,7 @@ import re
 from .config import settings
 
 SAFETY_VIDEO_URL = "https://www.youtube.com/watch?v=5bZ37Hf82B0&t=11s"
-INDEMNITY_FORM_URL = "https://forms.gle/paenRq6yLNXjjqYo9"
+INDEMNITY_FORM_URL = "https://jetskiandmore-frontend.vercel.app/interim-skipper-quiz"
 
 RIDE_LABELS = {
     '30-1': '30‑min Rental (1 Jet‑Ski)',
