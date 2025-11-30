@@ -30,6 +30,7 @@ from .schemas import (
     ChargeResponse,
     ContactRequest,
     ContactResponse,
+    InterimSkipperQuizAdminResponse,
     InterimSkipperQuizRequest,
     InterimSkipperQuizResponse,
     PaymentQuoteRequest,
@@ -168,6 +169,40 @@ def interim_skipper_quiz(req: InterimSkipperQuizRequest):
     }
     res = db.interim_skipper_quiz_submission.insert_one(doc)
     return InterimSkipperQuizResponse(ok=True, success=True, id=str(res.inserted_id))
+
+
+def _serialize_quiz_submission(doc: Dict[str, Any]) -> InterimSkipperQuizAdminResponse:
+    return InterimSkipperQuizAdminResponse(
+        id=str(doc.get("_id")),
+        email=str(doc.get("email") or ""),
+        name=str(doc.get("name") or ""),
+        surname=str(doc.get("surname") or ""),
+        idNumber=str(doc.get("id_number") or ""),
+        passengerName=doc.get("passenger_name"),
+        passengerSurname=doc.get("passenger_surname"),
+        passengerEmail=doc.get("passenger_email"),
+        passengerIdNumber=doc.get("passenger_id_number"),
+        hasWatchedTutorial=bool(doc.get("has_watched_tutorial")),
+        hasAcceptedIndemnity=bool(doc.get("has_accepted_indemnity")),
+        quizAnswers=doc.get("quiz_answers") or {},
+        createdAt=doc.get("created_at"),
+    )
+
+
+@router.get("/admin/interim-skipper-quiz", response_model=List[InterimSkipperQuizAdminResponse])
+def admin_list_interim_skipper_quiz(
+    limit: int = 100,
+    skip: int = 0,
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    cursor = (
+        db.interim_skipper_quiz_submission.find()
+        .sort("created_at", -1)
+        .skip(max(skip, 0))
+        .limit(max(limit, 1))
+    )
+    return [_serialize_quiz_submission(doc) for doc in cursor]
 
 
 @router.post("/bookings", response_model=BookingResponse)

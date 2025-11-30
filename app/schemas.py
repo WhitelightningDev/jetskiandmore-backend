@@ -202,3 +202,19 @@ class InterimSkipperQuizResponse(BaseModel):
     success: bool = True
     ok: bool
     id: str
+
+
+class InterimSkipperQuizAdminResponse(BaseModel):
+    id: str
+    email: EmailStr
+    name: str
+    surname: str
+    idNumber: str
+    passengerName: Optional[str] = None
+    passengerSurname: Optional[str] = None
+    passengerEmail: Optional[EmailStr] = None
+    passengerIdNumber: Optional[str] = None
+    hasWatchedTutorial: bool
+    hasAcceptedIndemnity: bool
+    quizAnswers: Dict[str, Any]
+    createdAt: Optional[datetime] = None
