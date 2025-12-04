@@ -903,9 +903,14 @@ def _persist_booking_and_notify(booking: dict, amount: int, charge_id: str, stat
         participants = _create_participants(db, doc, booking_id)
     except Exception:
         participants = []
+    # Always ensure we email the primary booker even if participant creation fails
     if not participants:
-        # Ensure at least the primary rider receives an email, even if participant insert fails
-        participants = [
+        participants = []
+    participants = participants or []
+    # If primary is missing, add one for emailing
+    if not any((p.get("role") or "").upper() == "PRIMARY_RIDER" for p in participants):
+        participants.insert(
+            0,
             {
                 "_id": ObjectId(),
                 "bookingId": booking_id,
@@ -916,13 +921,12 @@ def _persist_booking_and_notify(booking: dict, amount: int, charge_id: str, stat
                 "isRider": True,
                 "positionNumber": 1,
                 "indemnityToken": secrets.token_urlsafe(16),
-            }
-        ]
+            },
+        )
     try:
-        if participants:
-            _send_booking_notifications(doc | {"_id": booking_id}, participants)
-    except Exception:
-        pass
+        _send_booking_notifications(doc | {"_id": booking_id}, participants)
+    except Exception as e:
+        print(f"[email] Notification send failed: {e}")
     return booking_id
 
 
