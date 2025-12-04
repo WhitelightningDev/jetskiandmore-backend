@@ -680,6 +680,9 @@ def payments_charge(req: ChargeBookingRequest):
         if success and settings.email_to:
             admin_body = format_payment_admin_email(req.booking.model_dump(), amount, charge_id, status)
             send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=req.booking.email)
+        if success:
+            client_body = format_payment_client_email(req.booking.model_dump(), amount, charge_id)
+            send_email(subject="Booking confirmed — payment received", body=client_body, to_address=req.booking.email)
     except Exception:
         pass
     # Persist booking + finalize slot + notify participants
@@ -895,18 +898,23 @@ def _send_booking_notifications(booking_doc: dict, participants: list[dict]):
 def _persist_booking_and_notify(booking: dict, amount: int, charge_id: str, status: str) -> Optional[str]:
     db = get_db()
     doc = _prepare_booking_doc(booking)
+    booking_id: Optional[str] = None
     try:
         booking_id = save_booking(doc, amount, charge_id, status=status)
-    except Exception:
-        return None
-    try:
-        participants = _create_participants(db, doc, booking_id)
-    except Exception:
-        participants = []
+    except Exception as e:
+        # Continue with notifications even if persistence fails
+        print(f"[booking] Failed to persist booking: {e}")
+        booking_id = None
+
+    participants: list[dict] = []
+    if booking_id:
+        try:
+            participants = _create_participants(db, doc, booking_id)
+        except Exception as e:
+            print(f"[booking] Failed to create participants: {e}")
+            participants = []
+
     # Always ensure we email the primary booker even if participant creation fails
-    if not participants:
-        participants = []
-    participants = participants or []
     # If primary is missing, add one for emailing
     if not any((p.get("role") or "").upper() == "PRIMARY_RIDER" for p in participants):
         participants.insert(
@@ -924,7 +932,9 @@ def _persist_booking_and_notify(booking: dict, amount: int, charge_id: str, stat
             },
         )
     try:
-        _send_booking_notifications(doc | {"_id": booking_id}, participants)
+        # Use a placeholder _id if saving failed so email templates have an id
+        placeholder_id = booking_id or str(ObjectId())
+        _send_booking_notifications(doc | {"_id": placeholder_id}, participants)
     except Exception as e:
         print(f"[email] Notification send failed: {e}")
     return booking_id
@@ -1178,6 +1188,11 @@ def payments_verify(req: VerifyPaymentRequest):
             if settings.email_to:
                 admin_body = format_payment_admin_email(booking, amount, charge_id, status)
                 send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=booking.get("email"))
+            try:
+                client_body = format_payment_client_email(booking, amount, charge_id)
+                send_email(subject="Booking confirmed — payment received", body=client_body, to_address=booking.get("email"))
+            except Exception:
+                pass
         except Exception:
             pass
 
