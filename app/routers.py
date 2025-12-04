@@ -742,7 +742,7 @@ def _site_base() -> str:
         # Fallback: first origin, even if local, for explicit setups
         return str(settings.allowed_origins[0]).rstrip("/")
     # Hard-coded live frontend as final fallback
-    return "https://jetskiandmore-frontend.vercel.app"
+    return "https://www.jetskiandmore.com"
 
 
 def _prepare_booking_doc(raw_booking: dict) -> dict:
