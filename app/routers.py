@@ -858,7 +858,6 @@ def _create_participants(db, booking_doc: dict, booking_id: str) -> list[dict]:
 
 def _send_booking_notifications(booking_doc: dict, participants: list[dict]):
     base = _site_base()
-    primary_name = booking_doc.get("fullName") or "Customer"
     booking_reference = booking_doc.get("bookingReference") or ""
     booking_group_id = booking_doc.get("bookingGroupId") or ""
     ride_label = _ride_label(booking_doc.get("rideId"), include_code=True)
@@ -890,33 +889,7 @@ def _send_booking_notifications(booking_doc: dict, participants: list[dict]):
     except Exception:
         pass
 
-    # Notify other participants if they have an email
-    for p in participants[1:]:
-        if not p.get("email"):
-            continue
-        pid = str(p.get("_id") or "")
-        body = format_participant_notification(
-            primary_name=primary_name,
-            participant=p,
-            booking_reference=booking_reference,
-            booking_group_id=booking_group_id,
-            ride_label=ride_label,
-            date=booking_doc.get("date"),
-            time=booking_doc.get("time"),
-            indemnity_link=indemnity_links.get(pid),
-        )
-        try:
-            sent = send_email(
-                subject=f"{primary_name} booked a ride — action needed",
-                body=body,
-                body_html=body,
-                to_address=p["email"],
-                reply_to=booking_doc.get("email"),
-            )
-            if not sent:
-                print(f"[email] Failed sending participant email to {p['email']}")
-        except Exception:
-            continue
+    # Skip additional participant notifications per request
 
 
 def _persist_booking_and_notify(booking: dict, amount: int, charge_id: str, status: str) -> Optional[str]:
