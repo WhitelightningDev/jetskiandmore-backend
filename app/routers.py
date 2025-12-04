@@ -1035,6 +1035,9 @@ def payments_verify_checkout(req: VerifyCheckoutRequest):
             # Persist booking and finalize slot
             try:
                 book_slot(booking.get('rideId'), booking.get('date'), booking.get('time'))
+            except Exception:
+                pass
+            try:
                 _persist_booking_and_notify(booking, amount, charge_id, status='approved')
             except Exception:
                 pass
