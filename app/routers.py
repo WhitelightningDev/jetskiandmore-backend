@@ -675,16 +675,18 @@ def payments_charge(req: ChargeBookingRequest):
     status = str(raw.get("status") or raw.get("outcome") or "unknown")
 
     success = status.lower() in ("successful", "succeeded", "paid", "approved", "captured") or raw.get("success") is True
-    # Best-effort admin email on success
+    # Best-effort admin + primary emails on success
     try:
         if success and settings.email_to:
             admin_body = format_payment_admin_email(req.booking.model_dump(), amount, charge_id, status)
             send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=req.booking.email)
-        if success:
+        if success and req.booking.email:
             client_body = format_payment_client_email(req.booking.model_dump(), amount, charge_id)
-            send_email(subject="Booking confirmed — payment received", body=client_body, to_address=req.booking.email)
-    except Exception:
-        pass
+            ok = send_email(subject="Booking confirmed — payment received", body=client_body, to_address=req.booking.email)
+            if not ok:
+                print(f"[email] Failed sending payment confirmation to {req.booking.email}")
+    except Exception as e:
+        print(f"[email] Error sending payment emails: {e}")
     # Persist booking + finalize slot + notify participants
     try:
         book_slot(req.booking.rideId, req.booking.date, req.booking.time)
@@ -1049,13 +1051,18 @@ def payments_verify_checkout(req: VerifyCheckoutRequest):
                 pass
             try:
                 _persist_booking_and_notify(booking, amount, charge_id, status='approved')
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[booking] Persist/notify failed: {e}")
             if settings.email_to:
                 admin_body = format_payment_admin_email(booking, amount, charge_id, "approved")
                 send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=booking.get("email"))
-        except Exception:
-            pass
+            if booking.get("email"):
+                client_body = format_payment_client_email(booking, amount, charge_id)
+                ok = send_email(subject="Booking confirmed — payment received", body=client_body, to_address=booking.get("email"))
+                if not ok:
+                    print(f"[email] Failed sending payment confirmation to {booking.get('email')}")
+        except Exception as e:
+            print(f"[email] Verify checkout flow error: {e}")
 
     return VerifyCheckoutResponse(ok=is_success, checkoutId=checkout_id, status=status, paymentId=payment_id)
 
@@ -1183,18 +1190,21 @@ def payments_verify(req: VerifyPaymentRequest):
                 pass
             try:
                 _persist_booking_and_notify(booking, amount, charge_id, status='approved')
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[booking] Persist/notify failed: {e}")
             if settings.email_to:
                 admin_body = format_payment_admin_email(booking, amount, charge_id, status)
                 send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=booking.get("email"))
             try:
-                client_body = format_payment_client_email(booking, amount, charge_id)
-                send_email(subject="Booking confirmed — payment received", body=client_body, to_address=booking.get("email"))
-            except Exception:
-                pass
-        except Exception:
-            pass
+                if booking.get("email"):
+                    client_body = format_payment_client_email(booking, amount, charge_id)
+                    ok = send_email(subject="Booking confirmed — payment received", body=client_body, to_address=booking.get("email"))
+                    if not ok:
+                        print(f"[email] Failed sending payment confirmation to {booking.get('email')}")
+            except Exception as e:
+                print(f"[email] Error sending client payment email: {e}")
+        except Exception as e:
+            print(f"[email] Verify payment flow error: {e}")
 
     return VerifyPaymentResponse(ok=(status == "approved"), orderId=order_id, status=status)
 
