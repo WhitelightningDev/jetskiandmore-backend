@@ -742,7 +742,7 @@ def _site_base() -> str:
         # Fallback: first origin, even if local, for explicit setups
         return str(settings.allowed_origins[0]).rstrip("/")
     # Hard-coded live frontend as final fallback
-    return "https://www.jetskiandmore.com"
+    return "https://jetskiandmore-frontend.vercel.app"
 
 
 def _prepare_booking_doc(raw_booking: dict) -> dict:
@@ -771,7 +771,6 @@ def _create_participants(db, booking_doc: dict, booking_id: str) -> list[dict]:
     booking_group_id = booking_doc.get("bookingGroupId")
     number_of_skis = int(booking_doc.get("numberOfJetSkis") or 1)
     passengers = booking_doc.get("passengers") or []
-    riders = booking_doc.get("riders") or []
     addons = booking_doc.get("addons") or {}
     try:
         extra_people = int(addons.get("extraPeople") or 0)
@@ -795,21 +794,12 @@ def _create_participants(db, booking_doc: dict, booking_id: str) -> list[dict]:
     )
     # Additional riders (if more jet skis)
     for idx in range(2, number_of_skis + 1):
-        rider_info = riders[idx - 2] if idx - 2 < len(riders) else {}
-        r_name = ""
-        r_email = None
-        try:
-            if isinstance(rider_info, dict):
-                r_name = str(rider_info.get("name") or "").strip()
-                r_email = rider_info.get("email")
-        except Exception:
-            r_name = ""
         participants.append(
             {
                 "bookingId": ObjectId(booking_id),
                 "bookingGroupId": booking_group_id,
-                "fullName": r_name or f"Rider {idx}",
-                "email": r_email,
+                "fullName": "",
+                "email": None,
                 "role": f"RIDER_{idx}",
                 "isRider": True,
                 "positionNumber": idx,
