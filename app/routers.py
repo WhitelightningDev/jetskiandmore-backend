@@ -42,6 +42,7 @@ from .schemas import (
     VerifyPaymentByIdResponse,
     VerifyPaymentRequest,
     VerifyPaymentResponse,
+    PageViewRequest,
 )
 from .yoco import YocoError, _get_oauth_token, create_charge
 import uuid
@@ -497,10 +498,15 @@ def admin_analytics_summary(admin: str = Depends(get_current_admin)):
                 "revenueInCents": revenue_cents,
             }
         )
+    try:
+        total_page_views = db.page_views.count_documents({})
+    except Exception:
+        total_page_views = 0
     return AnalyticsSummaryResponse(
         totalBookings=total_bookings,
         totalRevenueInCents=total_revenue_cents,
         totalRevenueZar=total_revenue_cents / 100.0,
+        totalPageViews=total_page_views,
         rides=rides,
     )
 
@@ -516,6 +522,23 @@ def admin_login(payload: AdminLoginRequest):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     token = _create_admin_token(subject=settings.admin_email)
     return AdminLoginResponse(token=token)
+
+
+@router.post("/metrics/pageview")
+def track_page_view(payload: PageViewRequest, user_agent: Optional[str] = Header(None)):
+    db = get_db()
+    doc = {
+        "path": (payload.path or "").strip(),
+        "referrer": (payload.referrer or "").strip() or None,
+        "user_agent": (payload.userAgent or "").strip() or (user_agent or None),
+        "created_at": datetime.utcnow(),
+    }
+    try:
+        db.page_views.insert_one(doc)
+    except Exception:
+        # Don't fail the client if analytics storage has an issue
+        pass
+    return {"ok": True}
 
 
 @router.post("/payments/charge", response_model=ChargeResponse)

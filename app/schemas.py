@@ -165,7 +165,14 @@ class AnalyticsSummaryResponse(BaseModel):
     totalBookings: int
     totalRevenueInCents: int
     totalRevenueZar: float
+    totalPageViews: int = 0
     rides: List[RideAnalytics]
+
+
+class PageViewRequest(BaseModel):
+    path: Optional[str] = None
+    referrer: Optional[str] = None
+    userAgent: Optional[str] = None
 
 
 # --- Interim skipper quiz ---
