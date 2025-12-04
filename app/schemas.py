@@ -27,6 +27,12 @@ class Addons(BaseModel):
 
 class Passenger(BaseModel):
     name: str
+    email: Optional[EmailStr] = None
+
+
+class Rider(BaseModel):
+    name: str
+    email: Optional[EmailStr] = None
 
 
 class BookingRequest(BaseModel):
@@ -39,6 +45,7 @@ class BookingRequest(BaseModel):
     notes: Optional[str] = None
     addons: Addons
     passengers: Optional[List[Passenger]] = None
+    riders: Optional[List[Rider]] = None
 
 
 class BookingResponse(BaseModel):
@@ -133,6 +140,8 @@ class AdminLoginResponse(BaseModel):
 class BookingAdminResponse(BaseModel):
     id: str
     rideId: str
+    bookingReference: Optional[str] = None
+    bookingGroupId: Optional[str] = None
     date: Optional[str] = None
     time: Optional[str] = None
     fullName: str
@@ -173,6 +182,55 @@ class PageViewRequest(BaseModel):
     path: Optional[str] = None
     referrer: Optional[str] = None
     userAgent: Optional[str] = None
+
+
+# --- Participants / indemnities ---
+
+
+class ParticipantRole(str):
+    PRIMARY_RIDER = "PRIMARY_RIDER"
+    RIDER = "RIDER"
+    PASSENGER = "PASSENGER"
+
+
+class ParticipantResponse(BaseModel):
+    id: str
+    bookingId: str
+    bookingGroupId: str
+    fullName: str
+    email: Optional[EmailStr] = None
+    role: str
+    isRider: bool = False
+    positionNumber: int
+    indemnityToken: Optional[str] = None
+    createdAt: Optional[datetime] = None
+
+
+class IndemnitySubmitRequest(BaseModel):
+    token: str
+    fullName: Optional[str] = None
+    email: Optional[EmailStr] = None
+    hasWatchedVideo: Optional[bool] = None
+
+
+class IndemnityStatusItem(BaseModel):
+    participantId: str
+    fullName: str
+    email: Optional[EmailStr] = None
+    role: str
+    isRider: bool
+    positionNumber: int
+    indemnityStatus: str
+    signedAt: Optional[datetime] = None
+
+
+class IndemnityStatusResponse(BaseModel):
+    bookingId: str
+    bookingGroupId: str
+    rideId: Optional[str] = None
+    date: Optional[str] = None
+    time: Optional[str] = None
+    participants: List[IndemnityStatusItem]
 
 
 # --- Interim skipper quiz ---

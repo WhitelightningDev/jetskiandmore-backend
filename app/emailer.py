@@ -8,6 +8,7 @@ from .config import settings
 
 SAFETY_VIDEO_URL = "https://www.youtube.com/watch?v=5bZ37Hf82B0&t=11s"
 INDEMNITY_FORM_URL = "https://jetskiandmore-frontend.vercel.app/interim-skipper-quiz"
+INDEMNITY_DYNAMIC_BASE = "https://jetskiandmore-frontend.vercel.app/indemnity"
 
 RIDE_LABELS = {
     '30-1': '30‑min Rental (1 Jet‑Ski)',
@@ -217,6 +218,114 @@ def _wrap_user_email(
       </body>
     </html>
     """
+
+
+def _summary_list(items: list[str]) -> str:
+    if not items:
+        return ""
+    bullets = "".join(f"<li style='margin:4px 0;color:#0f172a;font-size:14px;'>{item}</li>" for item in items)
+    return f"<ul style='margin:10px 0 0 0;padding-left:18px;'>{bullets}</ul>"
+
+
+def format_booking_confirmation_email(
+    booking: dict,
+    participants: list[dict],
+    booking_reference: str,
+    booking_group_id: str,
+    indemnity_links: dict[str, str],
+) -> str:
+    ride_id = booking.get("rideId")
+    ride_label = _ride_label(ride_id, include_code=True)
+    date = booking.get("date") or "-"
+    time = booking.get("time") or "-"
+    addons = booking.get("addons") or {}
+    summary_rows = [
+        ("Booking reference", booking_reference),
+        ("Booking group", booking_group_id),
+        ("Ride", ride_label),
+        ("Date", date),
+        ("Time", time),
+        ("Jet skis", str(booking.get("numberOfJetSkis") or 1)),
+    ]
+    body_rows = _info_table(summary_rows)
+    addons_table = _addons_table(addons, label_width=170)
+    participant_items: list[str] = []
+    for p in participants:
+        role_label = p.get("role") or "Participant"
+        name = p.get("fullName") or "Guest"
+        link = indemnity_links.get(str(p.get("_id") or p.get("id") or ""))
+        link_html = f' — <a href="{link}">Indemnity link</a>' if link else ""
+        participant_items.append(f"{role_label}: {name}{link_html}")
+    participants_html = _summary_list(participant_items) if participant_items else "<p style='color:#6b7280;'>No participants captured.</p>"
+    safety = _safety_section()
+    body = f"""
+      <p style="font-size:15px;color:#0f172a;">Thanks for booking with Jet Ski &amp; More. Here are your details:</p>
+      {body_rows}
+      <div style="margin-top:12px;font-weight:600;color:#0f172a;">Participants</div>
+      {participants_html}
+      <div style="margin-top:12px;font-weight:600;color:#0f172a;">Add-ons</div>
+      {addons_table}
+      {safety}
+    """
+    return _wrap_user_email(
+        title="Booking confirmed",
+        hero="Booking confirmed",
+        body_html=body,
+        preheader=f"Booking {booking_reference} confirmed",
+    )
+
+
+def format_participant_notification(
+    primary_name: str,
+    participant: dict,
+    booking_reference: str,
+    booking_group_id: str,
+    ride_label: str,
+    date: str | None,
+    time: str | None,
+    indemnity_link: str | None,
+) -> str:
+    role = participant.get("role") or "Participant"
+    name = participant.get("fullName") or "Guest"
+    indemnity_button = (
+        f'<a href="{indemnity_link}" target="_blank" rel="noreferrer" '
+        'style="display:inline-block;margin:0 0 10px 0;padding:12px 14px;'
+        'color:#0ea5e9;text-decoration:none;border-radius:8px;'
+        'border:1px solid #0ea5e9;font-weight:700;">Complete indemnity</a>'
+        if indemnity_link
+        else ""
+    )
+    body = f"""
+      <p style="font-size:15px;color:#0f172a;">{primary_name} booked a ride and listed you as {role.lower().replace('_', ' ')}.</p>
+      {_info_table([
+        ("Booking reference", booking_reference),
+        ("Booking group", booking_group_id),
+        ("Ride", ride_label),
+        ("Date", date or "-"),
+        ("Time", time or "-"),
+        ("Your role", role),
+      ])}
+      <p style="margin-top:10px;font-weight:600;color:#0f172a;">What to do next</p>
+      <ol style="padding-left:18px;margin:6px 0;color:#0f172a;font-size:14px;">
+        <li>Watch the safety video before arrival.</li>
+        <li>Complete your indemnity form.</li>
+      </ol>
+      <div style="margin:12px 0;">
+        <a href="{SAFETY_VIDEO_URL}" target="_blank" rel="noreferrer" style="display:inline-block;margin:0 10px 10px 0;padding:12px 14px;background:#0ea5e9;color:#ffffff;text-decoration:none;border-radius:8px;font-weight:700;">Watch safety video</a>
+        {indemnity_button}
+      </div>
+      <p style="color:#475569;font-size:13px;">Role: {role} • Name: {name}</p>
+    """
+    return _wrap_user_email(
+        title="You’re on a Jet Ski booking",
+        hero="You’re on a booking",
+        body_html=body,
+        preheader=f"{primary_name} booked a ride and listed you as {role}",
+    )
+
+
+def build_indemnity_link(base: str, token: str) -> str:
+    return f"{base}?token={token}"
 
 
 def format_booking_email(data: dict) -> str:

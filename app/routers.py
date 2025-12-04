@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+import secrets
+import string
 
 import httpx
 import re
@@ -15,6 +17,9 @@ from .emailer import (
     format_payment_admin_email,
     format_payment_client_email,
     send_email,
+    format_booking_confirmation_email,
+    format_participant_notification,
+    build_indemnity_link,
 )
 from .pricing import compute_amount_cents
 from .schemas import (
@@ -43,6 +48,9 @@ from .schemas import (
     VerifyPaymentRequest,
     VerifyPaymentResponse,
     PageViewRequest,
+    IndemnitySubmitRequest,
+    IndemnityStatusResponse,
+    IndemnityStatusItem,
 )
 from .yoco import YocoError, _get_oauth_token, create_charge
 import uuid
@@ -54,6 +62,7 @@ router = APIRouter(prefix="/api")
 # In-memory mapping from order_id -> booking dict for webhook/verification
 ORDER_BOOKINGS: dict[str, dict] = {}
 CHECKOUT_BOOKINGS: dict[str, dict] = {}
+INDEMNITY_PATH = "/indemnity"
 
 
 # --- Admin auth helpers ---
@@ -94,6 +103,33 @@ def get_current_admin(authorization: Optional[str] = Header(None)) -> str:
     if subject != expected:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid subject")
     return subject
+
+
+# --- Booking helpers ---
+
+
+def _number_of_jet_skis(ride_id: str) -> int:
+    try:
+        match = re.match(r"^(?:30|60)-(\d+)", ride_id or "")
+        if match:
+            n = int(match.group(1))
+            return max(1, min(10, n))
+        if ride_id == "group":
+            return 5
+        return 1
+    except Exception:
+        return 1
+
+
+def _generate_booking_reference(now: Optional[datetime] = None) -> str:
+    now = now or datetime.utcnow()
+    return f"JSM-{now.year}-{now.strftime('%m%d%H%M%S')}"
+
+
+def _generate_booking_group_id() -> str:
+    alphabet = string.ascii_uppercase + string.digits
+    token = "".join(secrets.choice(alphabet) for _ in range(6))
+    return f"JSM-BOOK-{token}"
 
 
 @router.post("/contact", response_model=ContactResponse)
@@ -541,6 +577,84 @@ def track_page_view(payload: PageViewRequest, user_agent: Optional[str] = Header
     return {"ok": True}
 
 
+@router.post("/indemnities/submit")
+def submit_indemnity(payload: IndemnitySubmitRequest):
+    if not payload.token:
+        raise HTTPException(status_code=400, detail="Missing token")
+    db = get_db()
+    participant = db.participants.find_one({"indemnityToken": payload.token})
+    if not participant:
+        raise HTTPException(status_code=404, detail="Invalid token")
+    booking_id = participant.get("bookingId")
+    booking_group_id = participant.get("bookingGroupId")
+    try:
+        pid = participant.get("_id")
+        db.indemnities.update_one(
+            {"participantId": pid},
+            {
+                "$set": {
+                    "bookingId": booking_id,
+                    "bookingGroupId": booking_group_id,
+                    "participantId": pid,
+                    "fullName": payload.fullName or participant.get("fullName") or "",
+                    "email": payload.email or participant.get("email"),
+                    "role": participant.get("role"),
+                    "signedAt": datetime.utcnow(),
+                    "hasWatchedVideo": bool(payload.hasWatchedVideo),
+                }
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not save indemnity: {e}")
+    return {"ok": True}
+
+
+@router.get("/bookings/{booking_id}/indemnities", response_model=IndemnityStatusResponse)
+def get_indemnities_for_booking(booking_id: str, admin: str = Depends(get_current_admin)):
+    db = get_db()
+    try:
+        oid = ObjectId(booking_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    booking = db.bookings.find_one({"_id": oid})
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    participants = list(db.participants.find({"bookingId": oid}))
+    indemnities = {str(i.get("participantId")): i for i in db.indemnities.find({"bookingId": oid})}
+
+    resp_items: list[IndemnityStatusItem] = []
+    for p in participants:
+        pid = str(p.get("_id"))
+        ind = indemnities.get(pid)
+        status = "PENDING"
+        signed_at = None
+        if ind and ind.get("signedAt"):
+            status = "SIGNED"
+            signed_at = ind.get("signedAt")
+        resp_items.append(
+            IndemnityStatusItem(
+                participantId=pid,
+                fullName=str(p.get("fullName") or ""),
+                email=p.get("email"),
+                role=str(p.get("role") or ""),
+                isRider=bool(p.get("isRider")),
+                positionNumber=int(p.get("positionNumber") or 0),
+                indemnityStatus=status,
+                signedAt=signed_at,
+            )
+        )
+
+    return IndemnityStatusResponse(
+        bookingId=str(booking.get("_id")),
+        bookingGroupId=str(booking.get("bookingGroupId") or ""),
+        rideId=booking.get("rideId"),
+        date=booking.get("date"),
+        time=booking.get("time"),
+        participants=resp_items,
+    )
+
+
 @router.post("/payments/charge", response_model=ChargeResponse)
 def payments_charge(req: ChargeBookingRequest):
     # Compute authoritative amount server-side
@@ -560,23 +674,21 @@ def payments_charge(req: ChargeBookingRequest):
     charge_id = str(raw.get("id") or raw.get("chargeId") or "unknown")
     status = str(raw.get("status") or raw.get("outcome") or "unknown")
 
-    # Best-effort email notifications on success
+    success = status.lower() in ("successful", "succeeded", "paid", "approved", "captured") or raw.get("success") is True
+    # Best-effort admin email on success
     try:
-        success = status.lower() in ("successful", "succeeded", "paid", "approved", "captured") or raw.get("success") is True
         if success and settings.email_to:
-            # Admin email
             admin_body = format_payment_admin_email(req.booking.model_dump(), amount, charge_id, status)
             send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=req.booking.email)
-            # Client email
-            client_body = format_payment_client_email(req.booking.model_dump(), amount, charge_id)
-            send_email(subject="Booking confirmed — payment received", body=client_body, to_address=req.booking.email)
     except Exception:
-        # Do not fail the charge response if emails fail
         pass
-    # Persist booking + finalize slot
+    # Persist booking + finalize slot + notify participants
     try:
         book_slot(req.booking.rideId, req.booking.date, req.booking.time)
-        save_booking(req.booking.model_dump(), amount, charge_id, status='approved' if success else status)
+    except Exception:
+        pass
+    try:
+        _persist_booking_and_notify(req.booking.model_dump(), amount, charge_id, status='approved' if success else status)
     except Exception:
         pass
 
@@ -631,6 +743,205 @@ def _site_base() -> str:
         return str(settings.allowed_origins[0]).rstrip("/")
     # Hard-coded live frontend as final fallback
     return "https://jetskiandmore-frontend.vercel.app"
+
+
+def _prepare_booking_doc(raw_booking: dict) -> dict:
+    now = datetime.utcnow()
+    doc = dict(raw_booking)
+    if not doc.get("bookingReference"):
+        doc["bookingReference"] = _generate_booking_reference(now)
+    if not doc.get("bookingGroupId"):
+        doc["bookingGroupId"] = _generate_booking_group_id()
+    if not doc.get("numberOfJetSkis"):
+        doc["numberOfJetSkis"] = _number_of_jet_skis(str(doc.get("rideId") or ""))
+    if not doc.get("createdByCustomerId"):
+        doc["createdByCustomerId"] = doc.get("email") or doc.get("fullName")
+    doc["createdAt"] = now
+    return doc
+
+
+def _participant_role_label(role: str, position: int, is_rider: bool) -> str:
+    base = "Rider" if is_rider else "Passenger"
+    if role.upper() == "PRIMARY_RIDER":
+        return "Primary Rider"
+    return f"{base} #{position}"
+
+
+def _create_participants(db, booking_doc: dict, booking_id: str) -> list[dict]:
+    booking_group_id = booking_doc.get("bookingGroupId")
+    number_of_skis = int(booking_doc.get("numberOfJetSkis") or 1)
+    passengers = booking_doc.get("passengers") or []
+    riders = booking_doc.get("riders") or []
+    addons = booking_doc.get("addons") or {}
+    try:
+        extra_people = int(addons.get("extraPeople") or 0)
+    except Exception:
+        extra_people = 0
+
+    participants: list[dict] = []
+    # Primary rider
+    participants.append(
+        {
+            "bookingId": ObjectId(booking_id),
+            "bookingGroupId": booking_group_id,
+            "fullName": booking_doc.get("fullName") or "Primary rider",
+            "email": booking_doc.get("email"),
+            "role": "PRIMARY_RIDER",
+            "isRider": True,
+            "positionNumber": 1,
+            "indemnityToken": secrets.token_urlsafe(16),
+            "createdAt": datetime.utcnow(),
+        }
+    )
+    # Additional riders (if more jet skis)
+    for idx in range(2, number_of_skis + 1):
+        rider_info = riders[idx - 2] if idx - 2 < len(riders) else {}
+        r_name = ""
+        r_email = None
+        try:
+            if isinstance(rider_info, dict):
+                r_name = str(rider_info.get("name") or "").strip()
+                r_email = rider_info.get("email")
+        except Exception:
+            r_name = ""
+        participants.append(
+            {
+                "bookingId": ObjectId(booking_id),
+                "bookingGroupId": booking_group_id,
+                "fullName": r_name or f"Rider {idx}",
+                "email": r_email,
+                "role": f"RIDER_{idx}",
+                "isRider": True,
+                "positionNumber": idx,
+                "indemnityToken": secrets.token_urlsafe(16),
+                "createdAt": datetime.utcnow(),
+            }
+        )
+
+    # Passengers provided
+    for idx, p in enumerate(passengers):
+        name = ""
+        email = None
+        try:
+            if isinstance(p, dict):
+                name = str(p.get("name") or "").strip()
+                email = p.get("email")
+        except Exception:
+            name = ""
+        participants.append(
+            {
+                "bookingId": ObjectId(booking_id),
+                "bookingGroupId": booking_group_id,
+                "fullName": name or f"Passenger {idx + 1}",
+                "email": email,
+                "role": f"PASSENGER_{idx + 1}",
+                "isRider": False,
+                "positionNumber": idx + 1,
+                "indemnityToken": secrets.token_urlsafe(16),
+                "createdAt": datetime.utcnow(),
+            }
+        )
+
+    # Extra unnamed passengers (from add-ons)
+    current_passengers = max(len(passengers), 0)
+    for extra_idx in range(current_passengers + 1, current_passengers + extra_people + 1):
+        participants.append(
+            {
+                "bookingId": ObjectId(booking_id),
+                "bookingGroupId": booking_group_id,
+                "fullName": f"Passenger {extra_idx}",
+                "email": None,
+                "role": f"PASSENGER_{extra_idx}",
+                "isRider": False,
+                "positionNumber": extra_idx,
+                "indemnityToken": secrets.token_urlsafe(16),
+                "createdAt": datetime.utcnow(),
+            }
+        )
+
+    if participants:
+        res = db.participants.insert_many(participants)
+        for i, oid in enumerate(res.inserted_ids):
+            participants[i]["_id"] = oid
+    return participants
+
+
+def _send_booking_notifications(booking_doc: dict, participants: list[dict]):
+    base = _site_base()
+    primary_name = booking_doc.get("fullName") or "Customer"
+    booking_reference = booking_doc.get("bookingReference") or ""
+    booking_group_id = booking_doc.get("bookingGroupId") or ""
+    ride_label = _ride_label(booking_doc.get("rideId"), include_code=True)
+    indemnity_links: dict[str, str] = {}
+    for p in participants:
+        token = p.get("indemnityToken")
+        pid = str(p.get("_id") or p.get("id") or "")
+        if token and pid:
+            indemnity_links[pid] = build_indemnity_link(f"{base}{INDEMNITY_PATH}", token)
+
+    try:
+        if booking_doc.get("email"):
+            body = format_booking_confirmation_email(
+                booking_doc,
+                participants,
+                booking_reference,
+                booking_group_id,
+                indemnity_links,
+            )
+            send_email(
+                subject=f"Booking confirmed — {booking_reference}",
+                body=body,
+                body_html=body,
+                to_address=booking_doc["email"],
+                reply_to=booking_doc.get("email"),
+            )
+    except Exception:
+        pass
+
+    # Notify other participants if they have an email
+    for p in participants[1:]:
+        if not p.get("email"):
+            continue
+        pid = str(p.get("_id") or "")
+        body = format_participant_notification(
+            primary_name=primary_name,
+            participant=p,
+            booking_reference=booking_reference,
+            booking_group_id=booking_group_id,
+            ride_label=ride_label,
+            date=booking_doc.get("date"),
+            time=booking_doc.get("time"),
+            indemnity_link=indemnity_links.get(pid),
+        )
+        try:
+            send_email(
+                subject=f"{primary_name} booked a ride — action needed",
+                body=body,
+                body_html=body,
+                to_address=p["email"],
+                reply_to=booking_doc.get("email"),
+            )
+        except Exception:
+            continue
+
+
+def _persist_booking_and_notify(booking: dict, amount: int, charge_id: str, status: str) -> Optional[str]:
+    db = get_db()
+    doc = _prepare_booking_doc(booking)
+    try:
+        booking_id = save_booking(doc, amount, charge_id, status=status)
+    except Exception:
+        return None
+    try:
+        participants = _create_participants(db, doc, booking_id)
+    except Exception:
+        participants = []
+    try:
+        if participants:
+            _send_booking_notifications(doc | {"_id": booking_id}, participants)
+    except Exception:
+        pass
+    return booking_id
 
 
 @router.post("/payments/checkout")
@@ -738,14 +1049,12 @@ def payments_verify_checkout(req: VerifyCheckoutRequest):
             # Persist booking and finalize slot
             try:
                 book_slot(booking.get('rideId'), booking.get('date'), booking.get('time'))
-                save_booking(booking, amount, charge_id, status='approved')
+                _persist_booking_and_notify(booking, amount, charge_id, status='approved')
             except Exception:
                 pass
             if settings.email_to:
                 admin_body = format_payment_admin_email(booking, amount, charge_id, "approved")
                 send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=booking.get("email"))
-            client_body = format_payment_client_email(booking, amount, charge_id)
-            send_email(subject="Booking confirmed — payment received", body=client_body, to_address=booking.get("email"))
         except Exception:
             pass
 
@@ -862,8 +1171,8 @@ def payments_verify(req: VerifyPaymentRequest):
         elif st in ("failed", "cancelled"):
             status = st
 
-    # On approved, send emails
-    if status == "approved" and settings.email_to:
+    # On approved, send emails/persist
+    if status == "approved":
         try:
             booking = ORDER_BOOKINGS.get(order_id) or req.booking.model_dump()
             amount = compute_amount_cents(booking.get("rideId"), (booking.get("addons") or {}))
@@ -871,13 +1180,15 @@ def payments_verify(req: VerifyPaymentRequest):
             # Persist booking and finalize slot
             try:
                 book_slot(booking.get('rideId'), booking.get('date'), booking.get('time'))
-                save_booking(booking, amount, charge_id, status='approved')
             except Exception:
                 pass
-            admin_body = format_payment_admin_email(booking, amount, charge_id, status)
-            send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=booking.get("email"))
-            client_body = format_payment_client_email(booking, amount, charge_id)
-            send_email(subject="Booking confirmed — payment received", body=client_body, to_address=booking.get("email"))
+            try:
+                _persist_booking_and_notify(booking, amount, charge_id, status='approved')
+            except Exception:
+                pass
+            if settings.email_to:
+                admin_body = format_payment_admin_email(booking, amount, charge_id, status)
+                send_email(subject=f"Paid booking — {charge_id}", body=admin_body, to_address=settings.email_to, reply_to=booking.get("email"))
         except Exception:
             pass
 

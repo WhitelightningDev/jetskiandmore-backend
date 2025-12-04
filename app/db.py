@@ -69,6 +69,7 @@ def _init_indexes(client: MongoClient):
     db.bookings.create_index([('email', ASCENDING)], name='idx_email')
     db.bookings.create_index([('date', ASCENDING)], name='idx_date')
     db.bookings.create_index([('rideId', ASCENDING), ('date', ASCENDING), ('time', ASCENDING)], name='idx_ride_date_time')
+    db.bookings.create_index([('bookingGroupId', ASCENDING)], name='idx_booking_group_id')
     # Rides: id unique
     db.rides.create_index([('id', ASCENDING)], unique=True, name='uniq_ride_id')
     # Pricing config doc
@@ -76,6 +77,13 @@ def _init_indexes(client: MongoClient):
     # Interim skipper quiz submissions
     db.interim_skipper_quiz_submission.create_index([('email', ASCENDING)], name='idx_quiz_email')
     db.interim_skipper_quiz_submission.create_index([('created_at', ASCENDING)], name='idx_quiz_created_at')
+    # Participants + indemnities
+    db.participants.create_index([('bookingId', ASCENDING)], name='idx_participants_booking')
+    db.participants.create_index([('bookingGroupId', ASCENDING)], name='idx_participants_group')
+    db.participants.create_index([('indemnityToken', ASCENDING)], unique=True, name='uniq_participant_token')
+    db.indemnities.create_index([('bookingId', ASCENDING)], name='idx_indemnities_booking')
+    db.indemnities.create_index([('bookingGroupId', ASCENDING)], name='idx_indemnities_group')
+    db.indemnities.create_index([('participantId', ASCENDING)], name='idx_indemnities_participant')
 
 
 def slot_key(ride_id: str, date: str | None, time_str: str | None) -> str:
