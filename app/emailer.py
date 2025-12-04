@@ -46,7 +46,7 @@ def _smtp_client():
         return server
 
 
-def send_email(subject: str, body: str, to_address: str, reply_to: str | None = None, body_html: str | None = None):
+def send_email(subject: str, body: str, to_address: str, reply_to: str | None = None, body_html: str | None = None) -> bool:
     msg = EmailMessage()
     msg['Subject'] = subject
     msg['From'] = f"{settings.email_from_name} <{settings.gmail_user}>"
@@ -68,6 +68,10 @@ def send_email(subject: str, body: str, to_address: str, reply_to: str | None = 
     server = _smtp_client()
     try:
         server.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"[email] Failed to send to {to_address}: {e}")
+        return False
     finally:
         try:
             server.quit()

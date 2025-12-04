@@ -878,13 +878,15 @@ def _send_booking_notifications(booking_doc: dict, participants: list[dict]):
                 booking_group_id,
                 indemnity_links,
             )
-            send_email(
+            sent = send_email(
                 subject=f"Booking confirmed — {booking_reference}",
                 body=body,
                 body_html=body,
                 to_address=booking_doc["email"],
                 reply_to=booking_doc.get("email"),
             )
+            if not sent:
+                print(f"[email] Failed sending primary confirmation to {booking_doc.get('email')}")
     except Exception:
         pass
 
@@ -904,13 +906,15 @@ def _send_booking_notifications(booking_doc: dict, participants: list[dict]):
             indemnity_link=indemnity_links.get(pid),
         )
         try:
-            send_email(
+            sent = send_email(
                 subject=f"{primary_name} booked a ride — action needed",
                 body=body,
                 body_html=body,
                 to_address=p["email"],
                 reply_to=booking_doc.get("email"),
             )
+            if not sent:
+                print(f"[email] Failed sending participant email to {p['email']}")
         except Exception:
             continue
 
