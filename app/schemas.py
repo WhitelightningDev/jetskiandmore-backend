@@ -187,6 +187,24 @@ class PageViewRequest(BaseModel):
     path: Optional[str] = None
     referrer: Optional[str] = None
     userAgent: Optional[str] = None
+    durationSeconds: Optional[float] = None
+    sessionId: Optional[str] = None
+
+
+class PageViewAnalyticsItem(BaseModel):
+    path: str
+    views: int
+    uniqueSessions: int
+    avgDurationSeconds: Optional[float] = None
+    totalDurationSeconds: float = 0
+    firstSeen: Optional[datetime] = None
+    lastSeen: Optional[datetime] = None
+
+
+class PageViewAnalyticsResponse(BaseModel):
+    items: List[PageViewAnalyticsItem]
+    totalViews: int
+    totalUniqueSessions: int
 
 
 # --- Participants / indemnities ---

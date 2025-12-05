@@ -84,6 +84,10 @@ def _init_indexes(client: MongoClient):
     db.indemnities.create_index([('bookingId', ASCENDING)], name='idx_indemnities_booking')
     db.indemnities.create_index([('bookingGroupId', ASCENDING)], name='idx_indemnities_group')
     db.indemnities.create_index([('participantId', ASCENDING)], name='idx_indemnities_participant')
+    # Page view analytics
+    db.page_views.create_index([('created_at', ASCENDING)], name='idx_page_views_created_at')
+    db.page_views.create_index([('path', ASCENDING)], name='idx_page_views_path')
+    db.page_views.create_index([('session_id', ASCENDING)], name='idx_page_views_session')
 
 
 def slot_key(ride_id: str, date: str | None, time_str: str | None) -> str:

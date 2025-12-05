@@ -53,6 +53,8 @@ from .schemas import (
     IndemnitySubmitRequest,
     IndemnityStatusResponse,
     IndemnityStatusItem,
+    PageViewAnalyticsResponse,
+    PageViewAnalyticsItem,
 )
 from .yoco import YocoError, _get_oauth_token, create_charge
 import uuid
@@ -105,6 +107,19 @@ def get_current_admin(authorization: Optional[str] = Header(None)) -> str:
     if subject != expected:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid subject")
     return subject
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        pass
+    try:
+        return datetime.strptime(value, "%Y-%m-%d")
+    except Exception:
+        return None
 
 
 # --- Booking helpers ---
@@ -561,6 +576,130 @@ def admin_analytics_summary(admin: str = Depends(get_current_admin)):
     )
 
 
+@router.get("/admin/analytics/pageviews", response_model=PageViewAnalyticsResponse)
+def admin_page_view_analytics(
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    limit: int = 50,
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    start_dt = _parse_iso_datetime(start)
+    end_dt = _parse_iso_datetime(end)
+
+    match_filter: Dict[str, Any] = {}
+    created_range: Dict[str, Any] = {}
+    if start_dt:
+        created_range["$gte"] = start_dt
+    if end_dt:
+        created_range["$lte"] = end_dt
+    if created_range:
+        match_filter["created_at"] = created_range
+
+    limit_val = max(1, min(limit, 200))
+    pipeline: List[Dict[str, Any]] = []
+    if match_filter:
+        pipeline.append({"$match": match_filter})
+    pipeline.extend(
+        [
+            {
+                "$group": {
+                    "_id": "$path",
+                    "views": {"$sum": 1},
+                    "uniqueSessions": {"$addToSet": "$session_id"},
+                    "totalDurationSeconds": {
+                        "$sum": {
+                            "$cond": [
+                                {
+                                    "$and": [
+                                        {"$ne": ["$duration_seconds", None]},
+                                        {"$gte": ["$duration_seconds", 0]},
+                                    ]
+                                },
+                                "$duration_seconds",
+                                0,
+                            ]
+                        }
+                    },
+                    "durationSamples": {
+                        "$sum": {
+                            "$cond": [
+                                {
+                                    "$and": [
+                                        {"$ne": ["$duration_seconds", None]},
+                                        {"$gte": ["$duration_seconds", 0]},
+                                    ]
+                                },
+                                1,
+                                0,
+                            ]
+                        }
+                    },
+                    "firstSeen": {"$min": "$created_at"},
+                    "lastSeen": {"$max": "$created_at"},
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "path": "$_id",
+                    "views": 1,
+                    "uniqueSessions": "$uniqueSessions",
+                    "totalDurationSeconds": 1,
+                    "durationSamples": 1,
+                    "firstSeen": 1,
+                    "lastSeen": 1,
+                }
+            },
+            {"$sort": {"views": -1}},
+            {"$limit": limit_val},
+        ]
+    )
+
+    try:
+        rows = list(db.page_views.aggregate(pipeline))
+    except Exception:
+        rows = []
+
+    items: List[PageViewAnalyticsItem] = []
+    for r in rows:
+        views = int(r.get("views") or 0)
+        unique_sessions_raw = r.get("uniqueSessions") or []
+        unique_sessions = [s for s in unique_sessions_raw if s]
+        duration_samples = int(r.get("durationSamples") or 0)
+        total_duration = float(r.get("totalDurationSeconds") or 0.0)
+        avg_duration = total_duration / duration_samples if duration_samples else None
+        items.append(
+            PageViewAnalyticsItem(
+                path=str(r.get("path") or ""),
+                views=views,
+                uniqueSessions=len(set(unique_sessions)),
+                totalDurationSeconds=total_duration,
+                avgDurationSeconds=avg_duration,
+                firstSeen=r.get("firstSeen"),
+                lastSeen=r.get("lastSeen"),
+            )
+        )
+
+    try:
+        total_views = db.page_views.count_documents(match_filter or {})
+    except Exception:
+        total_views = 0
+
+    try:
+        session_filter = dict(match_filter)
+        session_filter["session_id"] = {"$nin": [None, ""]}
+        total_unique_sessions = len(db.page_views.distinct("session_id", session_filter))
+    except Exception:
+        total_unique_sessions = 0
+
+    return PageViewAnalyticsResponse(
+        items=items,
+        totalViews=total_views,
+        totalUniqueSessions=total_unique_sessions,
+    )
+
+
 # --- Admin: authentication ---
 
 
@@ -577,10 +716,21 @@ def admin_login(payload: AdminLoginRequest):
 @router.post("/metrics/pageview")
 def track_page_view(payload: PageViewRequest, user_agent: Optional[str] = Header(None)):
     db = get_db()
+    session_id = (payload.sessionId or "").strip() or None
+    duration = None
+    try:
+        if payload.durationSeconds is not None:
+            duration = float(payload.durationSeconds)
+            if duration < 0 or duration > 6 * 3600:  # ignore negative or implausibly long stays
+                duration = None
+    except Exception:
+        duration = None
     doc = {
         "path": (payload.path or "").strip(),
         "referrer": (payload.referrer or "").strip() or None,
         "user_agent": (payload.userAgent or "").strip() or (user_agent or None),
+        "session_id": session_id,
+        "duration_seconds": duration,
         "created_at": datetime.utcnow(),
     }
     try:
