@@ -55,6 +55,10 @@ from .schemas import (
     IndemnityStatusItem,
     PageViewAnalyticsResponse,
     PageViewAnalyticsItem,
+    CountStat,
+    PageViewBreakdowns,
+    TimeOfDayStat,
+    ReturningStat,
 )
 from .yoco import YocoError, _get_oauth_token, create_charge
 import uuid
@@ -120,6 +124,53 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime]:
         return datetime.strptime(value, "%Y-%m-%d")
     except Exception:
         return None
+
+
+def _clean(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    s = str(value).strip()
+    return s or None
+
+
+def _parse_user_agent(ua: Optional[str]) -> dict[str, Optional[str]]:
+    ua = ua or ""
+    ua_lower = ua.lower()
+    device_type = "Desktop"
+    if any(k in ua_lower for k in ["mobi", "android", "iphone"]):
+        device_type = "Mobile"
+    if "ipad" in ua_lower or "tablet" in ua_lower:
+        device_type = "Tablet"
+
+    os = None
+    if "windows" in ua_lower:
+        os = "Windows"
+    elif "mac os" in ua_lower or "macintosh" in ua_lower:
+        os = "Mac"
+    elif "android" in ua_lower:
+        os = "Android"
+    elif "iphone" in ua_lower or "ipad" in ua_lower or "ios" in ua_lower:
+        os = "iOS"
+    elif "linux" in ua_lower:
+        os = "Linux"
+
+    browser = None
+    if "edg" in ua_lower:
+        browser = "Edge"
+    elif "chrome" in ua_lower and "safari" in ua_lower:
+        browser = "Chrome"
+    elif "safari" in ua_lower and "chrome" not in ua_lower:
+        browser = "Safari"
+    elif "firefox" in ua_lower:
+        browser = "Firefox"
+    elif "brave" in ua_lower:
+        browser = "Brave"
+
+    return {
+        "device_type": device_type,
+        "os": os,
+        "browser": browser,
+    }
 
 
 # --- Booking helpers ---
@@ -693,10 +744,102 @@ def admin_page_view_analytics(
     except Exception:
         total_unique_sessions = 0
 
+    # Top-N breakdown helper
+    def _top(field: str, limit_count: int = 10) -> list[CountStat]:
+        agg: list[dict] = []
+        if match_filter:
+            agg.append({"$match": match_filter})
+        agg.extend(
+            [
+                {"$match": {field: {"$nin": [None, ""]}}},
+                {"$group": {"_id": f"${field}", "count": {"$sum": 1}}},
+                {"$sort": {"count": -1}},
+                {"$limit": limit_count},
+            ]
+        )
+        try:
+            res = list(db.page_views.aggregate(agg))
+        except Exception:
+            res = []
+        return [CountStat(key=str(r.get("_id") or ""), count=int(r.get("count") or 0)) for r in res]
+
+    # Time of day (hour of day, 0-23)
+    tod_pipeline: list[dict] = []
+    if match_filter:
+        tod_pipeline.append({"$match": match_filter})
+    tod_pipeline.extend(
+        [
+            {
+                "$group": {
+                    "_id": {"$hour": "$created_at"},
+                    "views": {"$sum": 1},
+                }
+            },
+            {"$sort": {"_id": 1}},
+        ]
+    )
+    try:
+        tod_rows = list(db.page_views.aggregate(tod_pipeline))
+    except Exception:
+        tod_rows = []
+    time_of_day = [
+        TimeOfDayStat(hour=int(r.get("_id") or 0), views=int(r.get("views") or 0)) for r in tod_rows
+    ]
+
+    # Returning vs new visitors (based on visitor_id)
+    ret_pipeline: list[dict] = []
+    visitor_match = dict(match_filter)
+    visitor_match["visitor_id"] = {"$nin": [None, ""]}
+    ret_pipeline.append({"$match": visitor_match})
+    ret_pipeline.extend(
+        [
+            {"$group": {"_id": "$visitor_id", "views": {"$sum": 1}}},
+            {
+                "$group": {
+                    "_id": None,
+                    "newVisitors": {"$sum": {"$cond": [{"$eq": ["$views", 1]}, 1, 0]}},
+                    "returningVisitors": {"$sum": {"$cond": [{"$gt": ["$views", 1]}, 1, 0]}},
+                }
+            },
+        ]
+    )
+    try:
+        ret_rows = list(db.page_views.aggregate(ret_pipeline))
+    except Exception:
+        ret_rows = []
+    returning_stats = ReturningStat(newVisitors=0, returningVisitors=0, totalVisitors=0)
+    if ret_rows:
+        row = ret_rows[0]
+        new_v = int(row.get("newVisitors") or 0)
+        ret_v = int(row.get("returningVisitors") or 0)
+        returning_stats = ReturningStat(
+            newVisitors=new_v, returningVisitors=ret_v, totalVisitors=new_v + ret_v
+        )
+
+    try:
+        visitor_filter = dict(match_filter)
+        visitor_filter["visitor_id"] = {"$nin": [None, ""]}
+        total_unique_visitors = len(db.page_views.distinct("visitor_id", visitor_filter))
+    except Exception:
+        total_unique_visitors = 0
+
+    breakdowns = PageViewBreakdowns(
+        countries=_top("country"),
+        cities=_top("city"),
+        deviceTypes=_top("device_type"),
+        os=_top("os"),
+        browsers=_top("browser"),
+        languages=_top("language"),
+        timeOfDay=time_of_day,
+        returning=returning_stats,
+    )
+
     return PageViewAnalyticsResponse(
         items=items,
         totalViews=total_views,
         totalUniqueSessions=total_unique_sessions,
+        totalUniqueVisitors=total_unique_visitors,
+        breakdowns=breakdowns,
     )
 
 
@@ -714,9 +857,10 @@ def admin_login(payload: AdminLoginRequest):
 
 
 @router.post("/metrics/pageview")
-def track_page_view(payload: PageViewRequest, user_agent: Optional[str] = Header(None)):
+def track_page_view(payload: PageViewRequest, user_agent: Optional[str] = Header(None), accept_language: Optional[str] = Header(None)):
     db = get_db()
     session_id = (payload.sessionId or "").strip() or None
+    visitor_id = (payload.visitorId or "").strip() or session_id
     duration = None
     try:
         if payload.durationSeconds is not None:
@@ -725,12 +869,21 @@ def track_page_view(payload: PageViewRequest, user_agent: Optional[str] = Header
                 duration = None
     except Exception:
         duration = None
+    ua_info = _parse_user_agent(payload.userAgent or user_agent)
+    lang = _clean(payload.language) or _clean((accept_language or "").split(",")[0])
     doc = {
         "path": (payload.path or "").strip(),
         "referrer": (payload.referrer or "").strip() or None,
         "user_agent": (payload.userAgent or "").strip() or (user_agent or None),
         "session_id": session_id,
         "duration_seconds": duration,
+        "visitor_id": visitor_id,
+        "country": _clean(payload.country),
+        "city": _clean(payload.city),
+        "device_type": _clean(payload.deviceType) or ua_info.get("device_type"),
+        "os": _clean(payload.os) or ua_info.get("os"),
+        "browser": _clean(payload.browser) or ua_info.get("browser"),
+        "language": lang,
         "created_at": datetime.utcnow(),
     }
     try:

@@ -187,8 +187,15 @@ class PageViewRequest(BaseModel):
     path: Optional[str] = None
     referrer: Optional[str] = None
     userAgent: Optional[str] = None
+    country: Optional[str] = None
+    city: Optional[str] = None
+    deviceType: Optional[str] = None
+    os: Optional[str] = None
+    browser: Optional[str] = None
+    language: Optional[str] = None
     durationSeconds: Optional[float] = None
     sessionId: Optional[str] = None
+    visitorId: Optional[str] = None
 
 
 class PageViewAnalyticsItem(BaseModel):
@@ -201,10 +208,39 @@ class PageViewAnalyticsItem(BaseModel):
     lastSeen: Optional[datetime] = None
 
 
+class CountStat(BaseModel):
+    key: str
+    count: int
+
+
+class TimeOfDayStat(BaseModel):
+    hour: int
+    views: int
+
+
+class ReturningStat(BaseModel):
+    newVisitors: int
+    returningVisitors: int
+    totalVisitors: int
+
+
+class PageViewBreakdowns(BaseModel):
+    countries: List[CountStat] = []
+    cities: List[CountStat] = []
+    deviceTypes: List[CountStat] = []
+    os: List[CountStat] = []
+    browsers: List[CountStat] = []
+    languages: List[CountStat] = []
+    timeOfDay: List[TimeOfDayStat] = []
+    returning: ReturningStat
+
+
 class PageViewAnalyticsResponse(BaseModel):
     items: List[PageViewAnalyticsItem]
     totalViews: int
     totalUniqueSessions: int
+    totalUniqueVisitors: int
+    breakdowns: PageViewBreakdowns
 
 
 # --- Participants / indemnities ---
