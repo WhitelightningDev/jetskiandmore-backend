@@ -9,7 +9,7 @@ from .config import settings
 SAFETY_VIDEO_URL = "https://www.youtube.com/watch?v=5bZ37Hf82B0&t=11s"
 INDEMNITY_FORM_URL = "https://www.jetskiandmore.com/interim-skipper-quiz"
 INDEMNITY_DYNAMIC_BASE = "https://www.jetskiandmore.com/indemnity"
-BOAT_RIDE_EMAIL = "info@falsebayoceanadventures.co.za"
+BOAT_RIDE_EMAIL = "heinrichkaiser007@gmail.com"
 
 RIDE_LABELS = {
     '30-1': '30‑min Rental (1 Jet‑Ski)',
