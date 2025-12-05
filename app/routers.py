@@ -20,6 +20,8 @@ from .emailer import (
     format_booking_confirmation_email,
     format_participant_notification,
     build_indemnity_link,
+    format_boat_ride_email,
+    BOAT_RIDE_EMAIL,
 )
 from .pricing import compute_amount_cents
 from .schemas import (
@@ -134,12 +136,24 @@ def _generate_booking_group_id() -> str:
 
 @router.post("/contact", response_model=ContactResponse)
 def contact(req: ContactRequest):
-    if not settings.email_to:
-        raise HTTPException(status_code=500, detail="Email recipient not configured")
-    # Send to admin; set Reply-To to user
-    body = format_contact_email(req.model_dump())
+    data = req.model_dump()
+    is_boat = str(req.type or "").strip().lower() == "boat-ride"
+
+    if is_boat:
+        to_address = req.targetEmail or BOAT_RIDE_EMAIL
+        subject = req.subject or "Boat ride request"
+        body_html = format_boat_ride_email(data)
+    else:
+        if not settings.email_to:
+            raise HTTPException(status_code=500, detail="Email recipient not configured")
+        to_address = settings.email_to
+        subject = req.subject or "New contact message"
+        body_html = format_contact_email(data)
+
     try:
-        send_email(subject="New contact message", body=body, to_address=settings.email_to, reply_to=req.email)
+        ok = send_email(subject=subject, body=body_html, body_html=body_html, to_address=to_address, reply_to=req.email)
+        if not ok:
+            raise RuntimeError("SMTP send returned False")
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Email send failed: {e}")
     return ContactResponse(ok=True, id=str(uuid.uuid4()))

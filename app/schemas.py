@@ -9,6 +9,11 @@ class ContactRequest(BaseModel):
     email: EmailStr
     phone: str = Field(..., min_length=3, max_length=50)
     message: str = Field(..., min_length=2, max_length=4000)
+    subject: Optional[str] = None
+    targetEmail: Optional[EmailStr] = None
+    type: Optional[str] = None
+    date: Optional[str] = None  # ISO date (YYYY-MM-DD)
+    people: Optional[int] = None
 
 
 class ContactResponse(BaseModel):

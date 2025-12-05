@@ -9,6 +9,7 @@ from .config import settings
 SAFETY_VIDEO_URL = "https://www.youtube.com/watch?v=5bZ37Hf82B0&t=11s"
 INDEMNITY_FORM_URL = "https://www.jetskiandmore.com/interim-skipper-quiz"
 INDEMNITY_DYNAMIC_BASE = "https://www.jetskiandmore.com/indemnity"
+BOAT_RIDE_EMAIL = "info@falsebayoceanadventures.co.za"
 
 RIDE_LABELS = {
     '30-1': '30‑min Rental (1 Jet‑Ski)',
@@ -534,6 +535,69 @@ def format_contact_email(data: dict) -> str:
                 <tr>
                   <td style="padding:14px 20px;background:#f9fafb;border-top:1px solid #e5e7eb;color:#6b7280;font-size:12px;">
                     This email was sent automatically from your website contact form.
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+        </table>
+      </body>
+    </html>
+    """
+    return html
+
+
+def format_boat_ride_email(data: dict) -> str:
+    ts = time.strftime('%Y-%m-%d %H:%M:%S')
+    brand = settings.email_from_name or "Jet Ski & More"
+    full_name = str(data.get('fullName') or '').strip()
+    email = str(data.get('email') or '').strip()
+    phone = str(data.get('phone') or '').strip()
+    message = str(data.get('message') or '').strip()
+    people = data.get('people')
+    date = str(data.get('date') or '').strip()
+
+    rows = [
+        ("Received", ts),
+        ("Name", full_name or "-"),
+        ("Email", email or "-"),
+        ("Phone", phone or "-"),
+        ("People", f"{people} (max 12)" if people else "-"),
+        ("Preferred date", date or "-"),
+    ]
+    info_table = _info_table(rows, label_width=140)
+
+    html = f"""
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>Boat ride request — {brand}</title>
+      </head>
+      <body style="margin:0;padding:0;background:#f6f7f9;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#111827;">
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#f6f7f9;padding:24px;">
+          <tr>
+            <td align="center">
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:640px;background:#ffffff;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+                <tr>
+                  <td style="background:#0369a1;color:#ffffff;padding:16px 20px;font-weight:600;font-size:16px;">
+                    {brand} — Boat ride request
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:20px;">
+                    <p style="margin:0 0 12px 0;color:#374151;">You received a new boat ride enquiry.</p>
+                    {info_table}
+                    <div style="margin-top:12px;padding:12px 14px;background:#f3f4f6;border:1px solid #e5e7eb;border-radius:6px;">
+                      <div style="font-size:13px;color:#6b7280;margin-bottom:6px;">Notes</div>
+                      <div style="white-space:pre-wrap;font-size:15px;color:#111827;">{message or '-'}</div>
+                    </div>
+                  </td>
+                </tr>
+                <tr>
+                  <td style="padding:14px 20px;background:#f9fafb;border-top:1px solid #e5e7eb;color:#6b7280;font-size:12px;">
+                    This email was sent automatically from the boat ride request form.
                   </td>
                 </tr>
               </table>
