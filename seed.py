@@ -290,7 +290,7 @@ def upsert_orders(db, verbose: bool = False) -> None:
         {
             "orderNumber": "ORD-1001",
             "userEmail": "admin@example.com",
-            "amount": 260000,
+            "amount": 408000,
             "currency": "ZAR",
             "status": "completed",
             "items": [{"sku": "60-2", "qty": 1, "label": "60‑min Rental (2 Jet‑Skis)"}],
@@ -300,7 +300,7 @@ def upsert_orders(db, verbose: bool = False) -> None:
         {
             "orderNumber": "ORD-1002",
             "userEmail": "user@example.com",
-            "amount": 175000,
+            "amount": 148800,
             "currency": "ZAR",
             "status": "created",
             "items": [{"sku": "30-1", "qty": 1, "label": "30‑min Rental (1 Jet‑Ski)"}],
@@ -319,18 +319,18 @@ def upsert_orders(db, verbose: bool = False) -> None:
 
 
 DEFAULT_RIDES = [
-    {"id": "30-1", "title": "30‑min Rental (1 Jet‑Ski)", "priceZar": 1750, "durationMinutes": 30},
-    {"id": "60-1", "title": "60‑min Rental (1 Jet‑Ski)", "priceZar": 2600, "durationMinutes": 60},
-    {"id": "30-2", "title": "30‑min Rental (2 Jet‑Skis)", "priceZar": 3100, "durationMinutes": 30},
-    {"id": "60-2", "title": "60‑min Rental (2 Jet‑Skis)", "priceZar": 4800, "durationMinutes": 60},
-    {"id": "30-3", "title": "30‑min Rental (3 Jet‑Skis)", "priceZar": 4500, "durationMinutes": 30},
-    {"id": "60-3", "title": "60‑min Rental (3 Jet‑Skis)", "priceZar": 6900, "durationMinutes": 60},
-    {"id": "30-4", "title": "30‑min Rental (4 Jet‑Skis)", "priceZar": 5800, "durationMinutes": 30},
-    {"id": "60-4", "title": "60‑min Rental (4 Jet‑Skis)", "priceZar": 9000, "durationMinutes": 60},
-    {"id": "30-5", "title": "30‑min Rental (5 Jet‑Skis)", "priceZar": 7100, "durationMinutes": 30},
-    {"id": "60-5", "title": "60‑min Rental (5 Jet‑Skis)", "priceZar": 11000, "durationMinutes": 60},
-    {"id": "joy", "title": "Joy Ride (Instructed) • 10 min", "priceZar": 700, "durationMinutes": 10},
-    {"id": "group", "title": "Group Session • 2 hr 30 min", "priceZar": 7500, "durationMinutes": 150},
+    {"id": "30-1", "title": "30‑min Rental (1 Jet‑Ski)", "priceZar": 1488, "durationMinutes": 30},
+    {"id": "60-1", "title": "60‑min Rental (1 Jet‑Ski)", "priceZar": 2210, "durationMinutes": 60},
+    {"id": "30-2", "title": "30‑min Rental (2 Jet‑Skis)", "priceZar": 2635, "durationMinutes": 30},
+    {"id": "60-2", "title": "60‑min Rental (2 Jet‑Skis)", "priceZar": 4080, "durationMinutes": 60},
+    {"id": "30-3", "title": "30‑min Rental (3 Jet‑Skis)", "priceZar": 3825, "durationMinutes": 30},
+    {"id": "60-3", "title": "60‑min Rental (3 Jet‑Skis)", "priceZar": 5865, "durationMinutes": 60},
+    {"id": "30-4", "title": "30‑min Rental (4 Jet‑Skis)", "priceZar": 4930, "durationMinutes": 30},
+    {"id": "60-4", "title": "60‑min Rental (4 Jet‑Skis)", "priceZar": 7650, "durationMinutes": 60},
+    {"id": "30-5", "title": "30‑min Rental (5 Jet‑Skis)", "priceZar": 6035, "durationMinutes": 30},
+    {"id": "60-5", "title": "60‑min Rental (5 Jet‑Skis)", "priceZar": 9350, "durationMinutes": 60},
+    {"id": "joy", "title": "Joy Ride (Instructed) • 10 min", "priceZar": 595, "durationMinutes": 10},
+    {"id": "group", "title": "Group Session • 2 hr 30 min", "priceZar": 6375, "durationMinutes": 150},
 ]
 
 DEFAULT_ADDON_PRICING = {
