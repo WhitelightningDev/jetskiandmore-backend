@@ -107,6 +107,10 @@ def _init_indexes(client: MongoClient):
     db.marketing_manual_recipients.create_index([('createdAt', ASCENDING)], name='idx_marketing_manual_created_at')
     # Marketing assets (images for email campaigns)
     db.marketing_assets.create_index([('createdAt', ASCENDING)], name='idx_marketing_assets_created_at')
+    # Marketing advisor (automated suggestions)
+    # _id is already uniquely indexed by MongoDB
+    db.marketing_advisor_events.create_index([('sentAt', ASCENDING)], name='idx_marketing_advisor_events_sent_at')
+    db.marketing_advisor_events.create_index([('toEmail', ASCENDING), ('sentAt', ASCENDING)], name='idx_marketing_advisor_events_to_sent_at')
 
 
 def slot_key(ride_id: str, date: str | None, time_str: str | None) -> str:

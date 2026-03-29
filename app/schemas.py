@@ -533,3 +533,17 @@ class MarketingInsightsResponse(BaseModel):
     whatToSend: List[str] = []
     whatNotToSend: List[str] = []
     ideas: List[CampaignIdea] = []
+
+
+class MarketingAdvisorStatusResponse(BaseModel):
+    enabled: bool
+    toEmail: Optional[EmailStr] = None
+    lastSentAt: Optional[datetime] = None
+    lastSentKey: Optional[str] = None
+    lastAttemptAt: Optional[datetime] = None
+    lastAttemptOk: Optional[bool] = None
+    lastError: Optional[str] = None
+
+
+class MarketingAdvisorSendTestRequest(BaseModel):
+    toEmail: Optional[EmailStr] = None

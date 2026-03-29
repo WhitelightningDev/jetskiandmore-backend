@@ -1,7 +1,9 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 from .config import settings
 from .routers import router as api_router
+from .marketing_advisor import marketing_advisor_loop
 
 
 app = FastAPI(title="JetSki & More API")
@@ -20,5 +22,10 @@ def health():
     return {"ok": True}
 
 
-app.include_router(api_router)
+@app.on_event("startup")
+async def _startup():
+    # Fire-and-forget background marketing advisor loop (in-process).
+    asyncio.create_task(marketing_advisor_loop())
 
+
+app.include_router(api_router)

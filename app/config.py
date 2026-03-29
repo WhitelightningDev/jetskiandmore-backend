@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     admin_password: str | None = None
     admin_jwt_secret: str = "change-me-in-prod"
 
+    # Marketing advisor (automated email suggestions)
+    marketing_advisor_enabled: bool = False
+    marketing_advisor_to: str | None = None
+    marketing_advisor_check_seconds: int = 300
+    marketing_advisor_retry_minutes: int = 30
+    marketing_advisor_lookback_days: int = 365
+    marketing_advisor_industry: str = "Jet ski rentals & water activities"
+    marketing_advisor_location: str = "South Africa (Africa/Johannesburg)"
+
     class Config:
         env_file = ".env"
         env_prefix = "JSM_"

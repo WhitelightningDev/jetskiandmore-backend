@@ -31,6 +31,7 @@ from .emailer import (
     BOAT_RIDE_EMAIL,
 )
 from .pricing import compute_amount_cents
+from .marketing_advisor import send_advisor_email
 from .schemas import (
     AnalyticsSummaryResponse,
     AdminLoginRequest,
@@ -80,10 +81,12 @@ from .schemas import (
     MarketingAudienceSummaryResponse,
     MarketingEmailEventListResponse,
     MarketingEmailEventResponse,
-    MarketingSendStatsResponse,
-    MarketingInsightsResponse,
-    HolidayItem,
-    CampaignIdea,
+	    MarketingSendStatsResponse,
+	    MarketingInsightsResponse,
+	    MarketingAdvisorStatusResponse,
+	    MarketingAdvisorSendTestRequest,
+	    HolidayItem,
+	    CampaignIdea,
     HourStat,
     DayOfWeekStat,
     MarketingManualRecipientsUploadResponse,
@@ -2033,6 +2036,33 @@ def admin_marketing_insights(
         whatNotToSend=what_not_to_send,
         ideas=ideas[:6],
     )
+
+
+@router.get("/admin/marketing/advisor/status", response_model=MarketingAdvisorStatusResponse)
+def admin_marketing_advisor_status(admin: str = Depends(get_current_admin)):
+    db = get_db()
+    doc = db.marketing_advisor_state.find_one({"_id": "default"}) or {}
+    enabled = bool(settings.marketing_advisor_enabled and settings.marketing_advisor_to)
+    return MarketingAdvisorStatusResponse(
+        enabled=enabled,
+        toEmail=settings.marketing_advisor_to,
+        lastSentAt=doc.get("lastSentAt"),
+        lastSentKey=doc.get("lastSentKey"),
+        lastAttemptAt=doc.get("lastAttemptAt"),
+        lastAttemptOk=doc.get("lastAttemptOk"),
+        lastError=doc.get("lastError"),
+    )
+
+
+@router.post("/admin/marketing/advisor/send-test")
+def admin_marketing_advisor_send_test(payload: MarketingAdvisorSendTestRequest, admin: str = Depends(get_current_admin)):
+    to_email = str(payload.toEmail or settings.marketing_advisor_to or settings.email_to or "").strip()
+    if not to_email:
+        raise HTTPException(status_code=400, detail="Missing recipient email")
+    ok = send_advisor_email(to_email, kind="test")
+    if not ok:
+        raise HTTPException(status_code=500, detail="Advisor email send failed")
+    return {"ok": True, "toEmail": to_email}
 
 
 @router.post("/metrics/pageview")
