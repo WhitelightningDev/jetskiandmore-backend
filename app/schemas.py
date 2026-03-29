@@ -364,6 +364,7 @@ class MarketingAudience(BaseModel):
     rideId: Optional[str] = None
     status: Optional[str] = None
     lastNDays: Optional[int] = None
+    includeManual: Optional[bool] = True
 
 
 class MarketingCampaignCreateRequest(BaseModel):
@@ -419,10 +420,35 @@ class MarketingRecipientsExportRequest(BaseModel):
     rideId: Optional[str] = None
     status: Optional[str] = None
     lastNDays: Optional[int] = None
+    includeManual: Optional[bool] = True
 
 
 class MarketingRecipientsExportResponse(BaseModel):
     emails: List[str] = []
+
+
+class MarketingManualRecipientsUploadResponse(BaseModel):
+    added: int = 0
+    total: int = 0
+    invalid: int = 0
+
+
+class MarketingManualRecipientsListResponse(BaseModel):
+    emails: List[str] = []
+    total: int = 0
+
+
+class MarketingAssetResponse(BaseModel):
+    id: str
+    filename: str
+    contentType: str
+    size: int
+    url: str
+    createdAt: Optional[datetime] = None
+
+
+class MarketingAssetListResponse(BaseModel):
+    items: List[MarketingAssetResponse] = []
 
 
 class MarketingRecipientsPreviewResponse(BaseModel):
@@ -440,3 +466,63 @@ class MarketingAudienceSummaryResponse(BaseModel):
     uniqueEmailsLast90Days: int
     byRide: List[CountStat] = []
     topDomains: List[CountStat] = []
+
+
+class MarketingEmailEventResponse(BaseModel):
+    id: str
+    campaignId: str
+    email: EmailStr
+    kind: str  # test | bulk
+    ok: bool
+    error: Optional[str] = None
+    subject: Optional[str] = None
+    sentAt: datetime
+
+
+class MarketingEmailEventListResponse(BaseModel):
+    items: List[MarketingEmailEventResponse] = []
+
+
+class HourStat(BaseModel):
+    hour: int
+    count: int
+
+
+class DayOfWeekStat(BaseModel):
+    day: int  # 0=Sun .. 6=Sat
+    count: int
+
+
+class MarketingSendStatsResponse(BaseModel):
+    totalAttempted: int
+    totalSent: int
+    totalFailed: int
+    byHour: List[HourStat] = []
+    byDayOfWeek: List[DayOfWeekStat] = []
+
+
+class HolidayItem(BaseModel):
+    date: str  # YYYY-MM-DD
+    name: str
+
+
+class CampaignIdea(BaseModel):
+    title: str
+    subject: str
+    preheader: Optional[str] = None
+    content: str
+    ctaLabel: Optional[str] = None
+    ctaUrl: Optional[str] = None
+    audience: Optional[MarketingAudience] = None
+
+
+class MarketingInsightsResponse(BaseModel):
+    industry: str
+    location: str
+    upcomingHolidays: List[HolidayItem] = []
+    recommendedSendHours: List[int] = []
+    bookingByHour: List[HourStat] = []
+    bookingByDayOfWeek: List[DayOfWeekStat] = []
+    whatToSend: List[str] = []
+    whatNotToSend: List[str] = []
+    ideas: List[CampaignIdea] = []

@@ -1,14 +1,20 @@
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 import secrets
 import string
 import time
+import csv
+import io
+from zoneinfo import ZoneInfo
+import hashlib
 
 import httpx
 import re
 import jwt
 from bson import ObjectId
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from bson.binary import Binary
+from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
+from fastapi.responses import Response
 
 from .config import settings
 from .db import book_slot, get_db, hold_slot, save_booking
@@ -72,6 +78,18 @@ from .schemas import (
     MarketingRecipientsPreviewResponse,
     MarketingSendTestRequest,
     MarketingAudienceSummaryResponse,
+    MarketingEmailEventListResponse,
+    MarketingEmailEventResponse,
+    MarketingSendStatsResponse,
+    MarketingInsightsResponse,
+    HolidayItem,
+    CampaignIdea,
+    HourStat,
+    DayOfWeekStat,
+    MarketingManualRecipientsUploadResponse,
+    MarketingManualRecipientsListResponse,
+    MarketingAssetResponse,
+    MarketingAssetListResponse,
 )
 from .yoco import YocoError, _get_oauth_token, create_charge
 import uuid
@@ -960,7 +978,107 @@ def admin_login(payload: AdminLoginRequest):
 # --- Admin marketing / campaigns ---
 
 
-EMAIL_RE = re.compile(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
+# Basic email sanity check (avoid whitespace and require a dot in the domain)
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+try:
+    _SAST = ZoneInfo("Africa/Johannesburg")
+except Exception:
+    _SAST = timezone.utc
+
+
+def _localize(dt: datetime) -> datetime:
+    try:
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(_SAST)
+    except Exception:
+        return dt
+
+
+def _dow_sun0(dt: datetime) -> int:
+    # Python weekday(): Mon=0..Sun=6. We want Sun=0..Sat=6.
+    return (dt.weekday() + 1) % 7
+
+
+def _easter_sunday(year: int) -> date:
+    # Anonymous Gregorian algorithm (Meeus/Jones/Butcher)
+    a = year % 19
+    b = year // 100
+    c = year % 100
+    d = b // 4
+    e = b % 4
+    f = (b + 8) // 25
+    g = (b - f + 1) // 3
+    h = (19 * a + b - d - g + 15) % 30
+    i = c // 4
+    k = c % 4
+    l = (32 + 2 * e + 2 * i - h - k) % 7
+    m = (a + 11 * h + 22 * l) // 451
+    month = (h + l - 7 * m + 114) // 31
+    day = ((h + l - 7 * m + 114) % 31) + 1
+    return date(year, month, day)
+
+
+def _upcoming_sa_holidays(from_dt: date, days: int = 120) -> list[HolidayItem]:
+    end_dt = from_dt + timedelta(days=max(1, days))
+    years = sorted({from_dt.year, end_dt.year})
+    items: list[HolidayItem] = []
+
+    def add(d: date, name: str):
+        if from_dt <= d <= end_dt:
+            items.append(HolidayItem(date=d.isoformat(), name=name))
+
+    for y in years:
+        add(date(y, 1, 1), "New Year's Day")
+        add(date(y, 3, 21), "Human Rights Day")
+        add(date(y, 4, 27), "Freedom Day")
+        add(date(y, 5, 1), "Workers' Day")
+        add(date(y, 6, 16), "Youth Day")
+        add(date(y, 8, 9), "National Women's Day")
+        add(date(y, 9, 24), "Heritage Day")
+        add(date(y, 12, 16), "Day of Reconciliation")
+        add(date(y, 12, 25), "Christmas Day")
+        add(date(y, 12, 26), "Day of Goodwill")
+
+        easter = _easter_sunday(y)
+        add(easter - timedelta(days=2), "Good Friday")
+        add(easter + timedelta(days=1), "Family Day (Easter Monday)")
+
+    items.sort(key=lambda x: x.date)
+    return items[:12]
+
+
+def _log_marketing_email_event(
+    *,
+    campaign_id: str,
+    email: str,
+    kind: str,
+    ok: bool,
+    subject: Optional[str],
+    sent_at: datetime,
+    admin: str,
+    error: Optional[str] = None,
+    run_id: Optional[str] = None,
+):
+    try:
+        db = get_db()
+        db.marketing_email_events.insert_one(
+            {
+                "campaignId": campaign_id,
+                "email": email,
+                "kind": kind,
+                "ok": bool(ok),
+                "error": error,
+                "subject": subject,
+                "sentAt": sent_at,
+                "createdBy": admin,
+                "runId": run_id,
+            }
+        )
+    except Exception:
+        return
 
 
 def _serialize_campaign(doc: Dict[str, Any]) -> MarketingCampaignResponse:
@@ -988,6 +1106,11 @@ def _build_recipients(audience: Optional[Dict[str, Any]] = None) -> list[str]:
     aud = audience or {}
     ride_id = str(aud.get("rideId") or "").strip() or None
     status_filter = str(aud.get("status") or "").strip() or None
+    include_manual = aud.get("includeManual")
+    if include_manual is None:
+        include_manual_bool = True
+    else:
+        include_manual_bool = bool(include_manual)
     last_n_days = aud.get("lastNDays")
     try:
         last_n_days_int = int(last_n_days) if last_n_days is not None else None
@@ -1000,7 +1123,9 @@ def _build_recipients(audience: Optional[Dict[str, Any]] = None) -> list[str]:
     if status_filter:
         query["status"] = status_filter
     if last_n_days_int and last_n_days_int > 0:
-        query["createdAt"] = {"$gte": datetime.utcnow() - timedelta(days=last_n_days_int)}
+        cutoff = datetime.utcnow() - timedelta(days=last_n_days_int)
+        # Support both legacy and current timestamp keys
+        query["$or"] = [{"createdAt": {"$gte": cutoff}}, {"created_at": {"$gte": cutoff}}]
 
     cursor = db.bookings.find(query, {"email": 1}).limit(20000)
     out: list[str] = []
@@ -1013,6 +1138,20 @@ def _build_recipients(audience: Optional[Dict[str, Any]] = None) -> list[str]:
             continue
         seen.add(email)
         out.append(email)
+
+    if include_manual_bool:
+        try:
+            manual_cursor = db.marketing_manual_recipients.find({}, {"email": 1}).limit(50000)
+            for doc in manual_cursor:
+                email = str(doc.get("email") or "").strip().lower()
+                if not email or not EMAIL_RE.match(email):
+                    continue
+                if email in seen:
+                    continue
+                seen.add(email)
+                out.append(email)
+        except Exception:
+            pass
     return out
 
 
@@ -1109,11 +1248,31 @@ def admin_send_test_campaign(
         raise HTTPException(status_code=404, detail="Campaign not found")
     subject = str(campaign.get("subject") or campaign.get("name") or "Jet Ski & More").strip()
     html = campaign.get("html") or campaign.get("content") or ""
+    sent_at = datetime.utcnow()
     try:
         ok = send_email(subject=subject, body=str(html), body_html=str(html), to_address=str(payload.toEmail))
         if not ok:
             raise RuntimeError("SMTP send returned False")
+        _log_marketing_email_event(
+            campaign_id=str(oid),
+            email=str(payload.toEmail).strip().lower(),
+            kind="test",
+            ok=True,
+            subject=subject,
+            sent_at=sent_at,
+            admin=admin,
+        )
     except Exception as e:
+        _log_marketing_email_event(
+            campaign_id=str(oid),
+            email=str(payload.toEmail).strip().lower(),
+            kind="test",
+            ok=False,
+            subject=subject,
+            sent_at=sent_at,
+            admin=admin,
+            error=str(e),
+        )
         raise HTTPException(status_code=500, detail=f"Email send failed: {e}")
     return {"ok": True}
 
@@ -1147,17 +1306,65 @@ def admin_send_campaign(campaign_id: str, admin: str = Depends(get_current_admin
     attempted = 0
     sent = 0
     failed = 0
+    run_id = uuid.uuid4().hex
+    event_docs: list[dict[str, Any]] = []
     for email in recipients:
         attempted += 1
+        sent_at = datetime.utcnow()
         try:
             ok = send_email(subject=subject, body=html, body_html=html, to_address=email)
             if ok:
                 sent += 1
+                event_docs.append(
+                    {
+                        "campaignId": str(oid),
+                        "email": email,
+                        "kind": "bulk",
+                        "ok": True,
+                        "error": None,
+                        "subject": subject,
+                        "sentAt": sent_at,
+                        "createdBy": admin,
+                        "runId": run_id,
+                    }
+                )
             else:
                 failed += 1
-        except Exception:
+                event_docs.append(
+                    {
+                        "campaignId": str(oid),
+                        "email": email,
+                        "kind": "bulk",
+                        "ok": False,
+                        "error": "SMTP send returned False",
+                        "subject": subject,
+                        "sentAt": sent_at,
+                        "createdBy": admin,
+                        "runId": run_id,
+                    }
+                )
+        except Exception as e:
             failed += 1
+            event_docs.append(
+                {
+                    "campaignId": str(oid),
+                    "email": email,
+                    "kind": "bulk",
+                    "ok": False,
+                    "error": str(e),
+                    "subject": subject,
+                    "sentAt": sent_at,
+                    "createdBy": admin,
+                    "runId": run_id,
+                }
+            )
         time.sleep(0.2)
+
+    try:
+        if event_docs:
+            db.marketing_email_events.insert_many(event_docs, ordered=False)
+    except Exception:
+        pass
 
     now = datetime.utcnow()
     db.marketing_campaigns.update_one(
@@ -1179,7 +1386,7 @@ def admin_send_campaign(campaign_id: str, admin: str = Depends(get_current_admin
 @router.get("/admin/marketing/audience/summary", response_model=MarketingAudienceSummaryResponse)
 def admin_marketing_audience_summary(admin: str = Depends(get_current_admin)):
     db = get_db()
-    docs = list(db.bookings.find({}, {"email": 1, "rideId": 1, "createdAt": 1}).limit(50000))
+    docs = list(db.bookings.find({}, {"email": 1, "rideId": 1, "createdAt": 1, "created_at": 1}).limit(50000))
     now = datetime.utcnow()
     cutoff30 = now - timedelta(days=30)
     cutoff90 = now - timedelta(days=90)
@@ -1200,12 +1407,21 @@ def admin_marketing_audience_summary(admin: str = Depends(get_current_admin)):
             domains[domain] = domains.get(domain, 0) + 1
 
         seen.add(email)
-        created = d.get("createdAt")
-        if created and isinstance(created, datetime):
-            if created >= cutoff90:
-                seen90.add(email)
-            if created >= cutoff30:
-                seen30.add(email)
+        created = d.get("createdAt") or d.get("created_at")
+        if created:
+            if isinstance(created, datetime):
+                created_dt = created
+            else:
+                created_dt = None
+                try:
+                    created_dt = datetime.fromisoformat(str(created))
+                except Exception:
+                    created_dt = None
+            if created_dt:
+                if created_dt >= cutoff90:
+                    seen90.add(email)
+                if created_dt >= cutoff30:
+                    seen30.add(email)
 
     by_ride_stats = sorted(
         [CountStat(key=k, count=len(v)) for k, v in by_ride.items()],
@@ -1231,6 +1447,451 @@ def admin_marketing_audience_summary(admin: str = Depends(get_current_admin)):
 def admin_export_recipients(payload: MarketingRecipientsExportRequest, admin: str = Depends(get_current_admin)):
     emails = _build_recipients(payload.model_dump(exclude_unset=True))
     return MarketingRecipientsExportResponse(emails=emails)
+
+
+def _serialize_marketing_asset(doc: Dict[str, Any]) -> MarketingAssetResponse:
+    oid = doc.get("_id")
+    asset_id = str(oid) if oid is not None else ""
+    filename = str(doc.get("filename") or "image")
+    content_type = str(doc.get("contentType") or "application/octet-stream")
+    size = int(doc.get("size") or 0)
+    return MarketingAssetResponse(
+        id=asset_id,
+        filename=filename,
+        contentType=content_type,
+        size=size,
+        url=f"/api/marketing/assets/{asset_id}",
+        createdAt=doc.get("createdAt"),
+    )
+
+
+@router.get("/marketing/assets/{asset_id}")
+def marketing_get_asset(asset_id: str):
+    db = get_db()
+    try:
+        oid = ObjectId(asset_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    doc = db.marketing_assets.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    data = doc.get("data")
+    if data is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    content_type = str(doc.get("contentType") or "application/octet-stream")
+    if not content_type.startswith("image/"):
+        content_type = "application/octet-stream"
+    content = bytes(data)
+    headers = {
+        "Cache-Control": "public, max-age=31536000, immutable",
+    }
+    return Response(content=content, media_type=content_type, headers=headers)
+
+
+@router.get("/admin/marketing/assets", response_model=MarketingAssetListResponse)
+def admin_list_marketing_assets(limit: int = 50, admin: str = Depends(get_current_admin)):
+    db = get_db()
+    lim = max(1, min(int(limit or 50), 200))
+    docs = list(db.marketing_assets.find({}, {"data": 0}).sort("createdAt", -1).limit(lim))
+    return MarketingAssetListResponse(items=[_serialize_marketing_asset(d) for d in docs])
+
+
+@router.post("/admin/marketing/assets/upload", response_model=MarketingAssetResponse)
+async def admin_upload_marketing_asset(
+    file: UploadFile = File(...),
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    content_type = str(file.content_type or "").strip().lower()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=400, detail="Only image uploads are supported")
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+    max_bytes = 5 * 1024 * 1024
+    if len(raw) > max_bytes:
+        raise HTTPException(status_code=400, detail="Image too large (max 5MB)")
+
+    filename = str(file.filename or "image").strip() or "image"
+    sha = hashlib.sha256(raw).hexdigest()
+    now = datetime.utcnow()
+    doc = {
+        "filename": filename,
+        "contentType": content_type,
+        "size": len(raw),
+        "sha256": sha,
+        "data": Binary(raw),
+        "createdAt": now,
+        "createdBy": admin,
+        "updatedAt": now,
+        "updatedBy": admin,
+    }
+    res = db.marketing_assets.insert_one(doc)
+    saved = db.marketing_assets.find_one({"_id": res.inserted_id}, {"data": 0}) or {**doc, "_id": res.inserted_id}
+    return _serialize_marketing_asset(saved)
+
+
+@router.get("/admin/marketing/manual-recipients", response_model=MarketingManualRecipientsListResponse)
+def admin_list_manual_recipients(limit: int = 20000, admin: str = Depends(get_current_admin)):
+    db = get_db()
+    lim = max(1, min(int(limit or 20000), 50000))
+    docs = list(db.marketing_manual_recipients.find({}, {"email": 1}).sort("createdAt", -1).limit(lim))
+    emails = []
+    for d in docs:
+        email = str(d.get("email") or "").strip().lower()
+        if not email or not EMAIL_RE.match(email):
+            continue
+        emails.append(email)
+    # De-dupe while preserving order
+    seen: set[str] = set()
+    unique = []
+    for e in emails:
+        if e in seen:
+            continue
+        seen.add(e)
+        unique.append(e)
+    total = 0
+    try:
+        total = int(db.marketing_manual_recipients.count_documents({}))
+    except Exception:
+        total = len(unique)
+    return MarketingManualRecipientsListResponse(emails=unique, total=total)
+
+
+@router.post("/admin/marketing/manual-recipients/upload", response_model=MarketingManualRecipientsUploadResponse)
+async def admin_upload_manual_recipients(
+    file: UploadFile = File(...),
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig", errors="ignore")
+    except Exception:
+        text = (raw or b"").decode("utf-8", errors="ignore")
+
+    # Parse CSV (supports: header with email column OR one email per line)
+    rows: list[str] = []
+    invalid = 0
+
+    stream = io.StringIO(text)
+    try:
+        reader = csv.reader(stream)
+        parsed = list(reader)
+    except Exception:
+        parsed = []
+
+    def _norm_col(col: str) -> str:
+        c = str(col or "").strip().lower()
+        # "Address 1 - State/Region" -> "address 1 state region"
+        c = re.sub(r"[^a-z0-9]+", " ", c).strip()
+        c = re.sub(r"\s+", " ", c)
+        return c
+
+    if parsed and parsed[0] and any("email" in _norm_col(c) or "e mail" in _norm_col(c) for c in parsed[0]):
+        header = [_norm_col(c) for c in parsed[0]]
+        email_cols: list[int] = []
+        for i, col in enumerate(header):
+            if ("email" in col or "e mail" in col) and "type" not in col:
+                email_cols.append(i)
+        for r in parsed[1:]:
+            if not r:
+                continue
+            if email_cols:
+                for idx in email_cols:
+                    if idx < len(r):
+                        rows.append(str(r[idx] or ""))
+            else:
+                for cell in r:
+                    rows.append(str(cell or ""))
+    else:
+        # Fallback: split by lines and commas
+        for line in text.splitlines():
+            for part in line.split(","):
+                rows.append(part)
+
+    seen: set[str] = set()
+    now = datetime.utcnow()
+    ops = []
+    for r in rows:
+        email = str(r or "").strip().strip('"').strip("'").lower()
+        if not email:
+            continue
+        if email in seen:
+            continue
+        seen.add(email)
+        if not EMAIL_RE.match(email):
+            invalid += 1
+            continue
+        ops.append(
+            {
+                "updateOne": {
+                    "filter": {"email": email},
+                    "update": {
+                        "$setOnInsert": {"createdAt": now, "createdBy": admin},
+                        "$set": {"email": email, "updatedAt": now, "updatedBy": admin},
+                    },
+                    "upsert": True,
+                }
+            }
+        )
+
+    added = 0
+    if ops:
+        try:
+            res = db.marketing_manual_recipients.bulk_write(ops, ordered=False)
+            added = int(res.upserted_count or 0)
+        except Exception:
+            # Best-effort fallback
+            for op in ops:
+                try:
+                    filt = op["updateOne"]["filter"]
+                    upd = op["updateOne"]["update"]
+                    r = db.marketing_manual_recipients.update_one(filt, upd, upsert=True)
+                    if r.upserted_id:
+                        added += 1
+                except Exception:
+                    continue
+
+    total = 0
+    try:
+        total = int(db.marketing_manual_recipients.count_documents({}))
+    except Exception:
+        total = 0
+    return MarketingManualRecipientsUploadResponse(added=added, total=total, invalid=invalid)
+
+
+@router.get("/admin/marketing/email-events", response_model=MarketingEmailEventListResponse)
+def admin_marketing_email_events(
+    campaignId: Optional[str] = None,
+    kind: Optional[str] = None,
+    limit: int = 100,
+    skip: int = 0,
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    q: Dict[str, Any] = {}
+    if campaignId:
+        q["campaignId"] = str(campaignId).strip()
+    if kind:
+        q["kind"] = str(kind).strip()
+    lim = max(1, min(int(limit or 100), 500))
+    sk = max(0, int(skip or 0))
+    docs = list(db.marketing_email_events.find(q).sort("sentAt", -1).skip(sk).limit(lim))
+    items: list[MarketingEmailEventResponse] = []
+    for d in docs:
+        sent_at = d.get("sentAt")
+        if not isinstance(sent_at, datetime):
+            sent_at = datetime.utcnow()
+        items.append(
+            MarketingEmailEventResponse(
+                id=str(d.get("_id")),
+                campaignId=str(d.get("campaignId") or ""),
+                email=str(d.get("email") or ""),
+                kind=str(d.get("kind") or ""),
+                ok=bool(d.get("ok")),
+                error=d.get("error"),
+                subject=d.get("subject"),
+                sentAt=sent_at,
+            )
+        )
+    return MarketingEmailEventListResponse(items=items)
+
+
+@router.get("/admin/marketing/send-stats", response_model=MarketingSendStatsResponse)
+def admin_marketing_send_stats(
+    days: int = 90,
+    kind: Optional[str] = None,
+    campaignId: Optional[str] = None,
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    d = max(1, min(int(days or 90), 365))
+    cutoff = datetime.utcnow() - timedelta(days=d)
+    q: Dict[str, Any] = {"sentAt": {"$gte": cutoff}}
+    if kind:
+        q["kind"] = str(kind).strip()
+    if campaignId:
+        q["campaignId"] = str(campaignId).strip()
+
+    docs = list(db.marketing_email_events.find(q, {"ok": 1, "sentAt": 1}))
+    total_attempted = len(docs)
+    total_sent = 0
+    total_failed = 0
+
+    by_hour: dict[int, int] = {h: 0 for h in range(24)}
+    by_dow: dict[int, int] = {i: 0 for i in range(7)}
+
+    for ev in docs:
+        ok = bool(ev.get("ok"))
+        if ok:
+            total_sent += 1
+        else:
+            total_failed += 1
+        sent_at = ev.get("sentAt")
+        if not isinstance(sent_at, datetime):
+            continue
+        local_dt = _localize(sent_at)
+        by_hour[int(local_dt.hour)] = by_hour.get(int(local_dt.hour), 0) + 1
+        by_dow[_dow_sun0(local_dt)] = by_dow.get(_dow_sun0(local_dt), 0) + 1
+
+    return MarketingSendStatsResponse(
+        totalAttempted=total_attempted,
+        totalSent=total_sent,
+        totalFailed=total_failed,
+        byHour=[HourStat(hour=h, count=by_hour.get(h, 0)) for h in range(24)],
+        byDayOfWeek=[DayOfWeekStat(day=i, count=by_dow.get(i, 0)) for i in range(7)],
+    )
+
+
+@router.get("/admin/marketing/insights", response_model=MarketingInsightsResponse)
+def admin_marketing_insights(
+    industry: Optional[str] = None,
+    location: Optional[str] = None,
+    lookbackDays: int = 180,
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    ind = (industry or "Jet ski rentals & water activities").strip()
+    loc = (location or "South Africa (Africa/Johannesburg)").strip()
+    lb = max(14, min(int(lookbackDays or 180), 730))
+
+    cutoff = datetime.utcnow() - timedelta(days=lb)
+    bookings = list(
+        db.bookings.find(
+            {"$or": [{"createdAt": {"$gte": cutoff}}, {"created_at": {"$gte": cutoff}}]},
+            {"createdAt": 1, "created_at": 1, "rideId": 1, "status": 1},
+        ).limit(100000)
+    )
+
+    booking_by_hour: dict[int, int] = {h: 0 for h in range(24)}
+    booking_by_dow: dict[int, int] = {i: 0 for i in range(7)}
+    ride_counts: dict[str, int] = {}
+
+    for b in bookings:
+        created = b.get("createdAt") or b.get("created_at")
+        if not isinstance(created, datetime):
+            continue
+        local_dt = _localize(created)
+        booking_by_hour[int(local_dt.hour)] = booking_by_hour.get(int(local_dt.hour), 0) + 1
+        booking_by_dow[_dow_sun0(local_dt)] = booking_by_dow.get(_dow_sun0(local_dt), 0) + 1
+        ride_id = str(b.get("rideId") or "").strip() or "unknown"
+        ride_counts[ride_id] = ride_counts.get(ride_id, 0) + 1
+
+    sorted_hours = sorted(booking_by_hour.items(), key=lambda x: x[1], reverse=True)
+    peak_hours = [h for h, c in sorted_hours[:4] if c > 0]
+    rec: list[int] = []
+    for h in peak_hours:
+        candidate = (h - 2) % 24
+        if 8 <= candidate <= 19 and candidate not in rec:
+            rec.append(candidate)
+    if not rec:
+        rec = [10, 12, 15, 18]
+
+    today_local = datetime.now(_SAST).date()
+    holidays = _upcoming_sa_holidays(today_local, days=140)
+
+    what_to_send = [
+        "Weather-aware availability updates (clear cancellation/reschedule policy)",
+        "Limited-slot reminders for weekends and public holidays",
+        "Family/group bundles (e.g., 2–5 jet-skis) with simple pricing",
+        "Gift voucher / birthday experience messaging",
+        "UGC requests: ask for photos/reviews after a successful ride",
+    ]
+    what_not_to_send = [
+        "Deep discounts without a clear limit (can erode premium perception)",
+        "Late-night sends (after 20:00) or very early sends (before 07:00)",
+        "Over-promising sea conditions (keep safety-first wording)",
+        "Too many emails in a short window (avoid daily blasts)",
+    ]
+
+    base_url = _site_base()
+    booking_url = f"{base_url}/book"
+    top_ride_ids = [k for k, _ in sorted(ride_counts.items(), key=lambda x: x[1], reverse=True)[:3]]
+    ride_hint = ", ".join(top_ride_ids) if top_ride_ids else "your preferred ride"
+
+    ideas: list[CampaignIdea] = []
+    if holidays:
+        h0 = holidays[0]
+        ideas.append(
+            CampaignIdea(
+                title=f"{h0.name} — Limited slots",
+                subject=f"{h0.name}: secure your Jet Ski slot",
+                preheader="Popular times sell out — book early for the best options.",
+                content=(
+                    f"Hi there,\n\n{h0.name} is coming up on {h0.date}. If you're planning a day on the water, "
+                    "we recommend booking ahead so you can choose the best time.\n\n"
+                    "Safety-first operations, clear briefing, and commercial-grade procedures.\n\n"
+                    "Book now to lock in your slot."
+                ),
+                ctaLabel="Book your slot",
+                ctaUrl=booking_url,
+                audience=MarketingAudience(lastNDays=365),
+            )
+        )
+
+    ideas.append(
+        CampaignIdea(
+            title="Thank you + apology (weather/technical)",
+            subject="Thank you for your support — we’re improving",
+            preheader="Sorry to anyone we couldn't help due to weather or technical issues.",
+            content=(
+                "Hi there,\n\n"
+                "Thank you for supporting Jet Ski & More. We also want to apologise to anyone we couldn't assist due "
+                "to weather conditions or technical difficulties.\n\n"
+                "We’re continuously improving our systems and processes so we can deliver a smoother experience, "
+                "while keeping safety as the priority.\n\n"
+                "If you’d like to try again, we’d love to have you on the water."
+            ),
+            ctaLabel="View availability",
+            ctaUrl=booking_url,
+            audience=MarketingAudience(lastNDays=730),
+        )
+    )
+    ideas.append(
+        CampaignIdea(
+            title="Weekend sell-out reminder",
+            subject="Weekend rides fill fast — book early",
+            preheader="Grab the best times before they’re gone.",
+            content=(
+                "Hi there,\n\n"
+                "Our weekend time slots can sell out quickly—especially the late morning and early afternoon.\n\n"
+                f"If you’re looking at {ride_hint}, we recommend booking ahead to secure your preferred time.\n\n"
+                "Book online in minutes."
+            ),
+            ctaLabel="Book online",
+            ctaUrl=booking_url,
+            audience=MarketingAudience(lastNDays=365),
+        )
+    )
+    ideas.append(
+        CampaignIdea(
+            title="Midweek calm-seas special",
+            subject="Midweek on the water — quieter, easier to book",
+            preheader="If your schedule is flexible, midweek has great availability.",
+            content=(
+                "Hi there,\n\n"
+                "If you can go midweek, you’ll often find more availability and a calmer, more relaxed experience.\n\n"
+                "Choose your ride time and we’ll take you through our structured customer briefing and onboarding.\n\n"
+                "Check availability and pick a slot that works for you."
+            ),
+            ctaLabel="Check availability",
+            ctaUrl=booking_url,
+            audience=MarketingAudience(lastNDays=365),
+        )
+    )
+
+    return MarketingInsightsResponse(
+        industry=ind,
+        location=loc,
+        upcomingHolidays=holidays,
+        recommendedSendHours=rec,
+        bookingByHour=[HourStat(hour=h, count=booking_by_hour.get(h, 0)) for h in range(24)],
+        bookingByDayOfWeek=[DayOfWeekStat(day=i, count=booking_by_dow.get(i, 0)) for i in range(7)],
+        whatToSend=what_to_send,
+        whatNotToSend=what_not_to_send,
+        ideas=ideas[:6],
+    )
 
 
 @router.post("/metrics/pageview")

@@ -97,6 +97,16 @@ def _init_indexes(client: MongoClient):
     db.marketing_campaigns.create_index([('status', ASCENDING)], name='idx_campaign_status')
     db.marketing_campaigns.create_index([('createdAt', ASCENDING)], name='idx_campaign_created_at')
     db.marketing_campaigns.create_index([('updatedAt', ASCENDING)], name='idx_campaign_updated_at')
+    # Marketing email events (send logs)
+    db.marketing_email_events.create_index([('sentAt', ASCENDING)], name='idx_marketing_email_events_sent_at')
+    db.marketing_email_events.create_index([('campaignId', ASCENDING), ('sentAt', ASCENDING)], name='idx_marketing_email_events_campaign_sent_at')
+    db.marketing_email_events.create_index([('email', ASCENDING)], name='idx_marketing_email_events_email')
+    db.marketing_email_events.create_index([('kind', ASCENDING), ('sentAt', ASCENDING)], name='idx_marketing_email_events_kind_sent_at')
+    # Marketing manual recipients (CSV uploads)
+    db.marketing_manual_recipients.create_index([('email', ASCENDING)], unique=True, name='uniq_marketing_manual_email')
+    db.marketing_manual_recipients.create_index([('createdAt', ASCENDING)], name='idx_marketing_manual_created_at')
+    # Marketing assets (images for email campaigns)
+    db.marketing_assets.create_index([('createdAt', ASCENDING)], name='idx_marketing_assets_created_at')
 
 
 def slot_key(ride_id: str, date: str | None, time_str: str | None) -> str:
