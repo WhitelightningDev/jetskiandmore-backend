@@ -47,7 +47,14 @@ def _smtp_client():
         return server
 
 
-def send_email(subject: str, body: str, to_address: str, reply_to: str | None = None, body_html: str | None = None) -> bool:
+def send_email(
+    subject: str,
+    body: str,
+    to_address: str,
+    reply_to: str | None = None,
+    body_html: str | None = None,
+    inline_images: list[dict] | None = None,
+) -> bool:
     msg = EmailMessage()
     msg['Subject'] = subject
     msg['From'] = f"{settings.email_from_name} <{settings.gmail_user}>"
@@ -63,6 +70,23 @@ def send_email(subject: str, body: str, to_address: str, reply_to: str | None = 
         text = re.sub(r'<[^>]+>', '', html)
         msg.set_content(text)
         msg.add_alternative(html, subtype='html')
+        if inline_images:
+            try:
+                html_part = msg.get_payload()[-1]
+                for img in inline_images:
+                    content_type = str(img.get("contentType") or "application/octet-stream")
+                    data = img.get("data") or b""
+                    cid = str(img.get("cid") or "").strip()
+                    if not cid:
+                        continue
+                    if "/" in content_type:
+                        maintype, subtype = content_type.split("/", 1)
+                    else:
+                        maintype, subtype = "application", "octet-stream"
+                    html_part.add_related(data, maintype=maintype, subtype=subtype, cid=cid)
+            except Exception:
+                # Best-effort only; fall back to remote images
+                pass
     else:
         msg.set_content(body)
 

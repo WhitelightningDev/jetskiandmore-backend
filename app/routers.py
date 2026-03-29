@@ -1081,6 +1081,45 @@ def _log_marketing_email_event(
         return
 
 
+ASSET_ID_RE = re.compile(r"/api/marketing/assets/([0-9a-fA-F]{24})")
+
+
+def _prepare_inline_assets(html: str) -> tuple[str, list[dict]]:
+    """Replace our hosted asset URLs in HTML with cid: references and return inline image payloads."""
+    db = get_db()
+    raw_html = str(html or "")
+    ids = list({m.group(1) for m in ASSET_ID_RE.finditer(raw_html)})
+    if not ids:
+        return raw_html, []
+    inline: list[dict] = []
+
+    out_html = raw_html
+    for asset_id in ids:
+        try:
+            oid = ObjectId(asset_id)
+        except Exception:
+            continue
+        doc = db.marketing_assets.find_one({"_id": oid})
+        if not doc:
+            continue
+        data = doc.get("data")
+        content_type = str(doc.get("contentType") or "application/octet-stream")
+        if not data or not content_type.startswith("image/"):
+            continue
+        cid = f"asset-{asset_id}"
+        inline.append({"cid": cid, "contentType": content_type, "data": bytes(data)})
+
+        asset_path = f"/api/marketing/assets/{asset_id}"
+        # Replace src="https://host/.../api/marketing/assets/<id>" OR src="/api/marketing/assets/<id>"
+        out_html = re.sub(
+            r'(src=["\'])(?:https?://[^"\']+)?' + re.escape(asset_path) + r'(["\'])',
+            rf"\1cid:{cid}\2",
+            out_html,
+            flags=re.IGNORECASE,
+        )
+    return out_html, inline
+
+
 def _serialize_campaign(doc: Dict[str, Any]) -> MarketingCampaignResponse:
     stats = doc.get("stats") or None
     return MarketingCampaignResponse(
@@ -1248,9 +1287,16 @@ def admin_send_test_campaign(
         raise HTTPException(status_code=404, detail="Campaign not found")
     subject = str(campaign.get("subject") or campaign.get("name") or "Jet Ski & More").strip()
     html = campaign.get("html") or campaign.get("content") or ""
+    html_to_send, inline_images = _prepare_inline_assets(str(html))
     sent_at = datetime.utcnow()
     try:
-        ok = send_email(subject=subject, body=str(html), body_html=str(html), to_address=str(payload.toEmail))
+        ok = send_email(
+            subject=subject,
+            body=str(html_to_send),
+            body_html=str(html_to_send),
+            to_address=str(payload.toEmail),
+            inline_images=inline_images,
+        )
         if not ok:
             raise RuntimeError("SMTP send returned False")
         _log_marketing_email_event(
@@ -1298,6 +1344,7 @@ def admin_send_campaign(campaign_id: str, admin: str = Depends(get_current_admin
     html = str(campaign.get("html") or campaign.get("content") or "").strip()
     if not html:
         raise HTTPException(status_code=400, detail="Campaign has no content")
+    html_to_send, inline_images = _prepare_inline_assets(html)
 
     max_recipients = 300
     if len(recipients) > max_recipients:
@@ -1312,7 +1359,13 @@ def admin_send_campaign(campaign_id: str, admin: str = Depends(get_current_admin
         attempted += 1
         sent_at = datetime.utcnow()
         try:
-            ok = send_email(subject=subject, body=html, body_html=html, to_address=email)
+            ok = send_email(
+                subject=subject,
+                body=html_to_send,
+                body_html=html_to_send,
+                to_address=email,
+                inline_images=inline_images,
+            )
             if ok:
                 sent += 1
                 event_docs.append(
