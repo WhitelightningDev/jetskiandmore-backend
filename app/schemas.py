@@ -129,6 +129,19 @@ class TimeslotAvailabilityResponse(BaseModel):
     times: List[str]
 
 
+class BookingControlsResponse(BaseModel):
+    jetSkiBookingsEnabled: bool
+    boatRideBookingsEnabled: bool
+    fishingChartersBookingsEnabled: bool
+    updatedAt: Optional[datetime] = None
+
+
+class BookingControlsUpdateRequest(BaseModel):
+    jetSkiBookingsEnabled: Optional[bool] = None
+    boatRideBookingsEnabled: Optional[bool] = None
+    fishingChartersBookingsEnabled: Optional[bool] = None
+
+
 # --- Admin / dashboard schemas ---
 
 

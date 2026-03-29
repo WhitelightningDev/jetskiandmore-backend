@@ -29,6 +29,8 @@ from .schemas import (
     AdminLoginRequest,
     AdminLoginResponse,
     BookingAdminResponse,
+    BookingControlsResponse,
+    BookingControlsUpdateRequest,
     BookingRequest,
     BookingResponse,
     BookingUpdateRequest,
@@ -71,6 +73,36 @@ router = APIRouter(prefix="/api")
 ORDER_BOOKINGS: dict[str, dict] = {}
 CHECKOUT_BOOKINGS: dict[str, dict] = {}
 INDEMNITY_PATH = "/indemnity"
+
+DEFAULT_BOOKING_CONTROLS = {
+    "jetSkiBookingsEnabled": False,
+    "boatRideBookingsEnabled": True,
+    "fishingChartersBookingsEnabled": True,
+}
+
+
+def _load_booking_controls() -> tuple[dict, Optional[datetime]]:
+    """Load booking toggle flags from MongoDB (best-effort).
+
+    Falls back to DEFAULT_BOOKING_CONTROLS if DB is unavailable or unset.
+    """
+    try:
+        db = get_db()
+        doc = db.site_settings.find_one({"key": "booking_controls"}) or {}
+        controls = {
+            "jetSkiBookingsEnabled": bool(doc.get("jetSkiBookingsEnabled", DEFAULT_BOOKING_CONTROLS["jetSkiBookingsEnabled"])),
+            "boatRideBookingsEnabled": bool(doc.get("boatRideBookingsEnabled", DEFAULT_BOOKING_CONTROLS["boatRideBookingsEnabled"])),
+            "fishingChartersBookingsEnabled": bool(doc.get("fishingChartersBookingsEnabled", DEFAULT_BOOKING_CONTROLS["fishingChartersBookingsEnabled"])),
+        }
+        return controls, doc.get("updatedAt")
+    except Exception:
+        return dict(DEFAULT_BOOKING_CONTROLS), None
+
+
+def _require_enabled(flag: str, message: str) -> None:
+    controls, _ = _load_booking_controls()
+    if not bool(controls.get(flag)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=message)
 
 
 # --- Admin auth helpers ---
@@ -173,6 +205,51 @@ def _parse_user_agent(ua: Optional[str]) -> dict[str, Optional[str]]:
     }
 
 
+# --- Public/admin booking toggle controls ---
+
+
+@router.get("/booking-controls", response_model=BookingControlsResponse)
+def booking_controls_public():
+    controls, updated_at = _load_booking_controls()
+    return BookingControlsResponse(**controls, updatedAt=updated_at)
+
+
+@router.get("/admin/booking-controls", response_model=BookingControlsResponse)
+def admin_get_booking_controls(admin: str = Depends(get_current_admin)):
+    controls, updated_at = _load_booking_controls()
+    return BookingControlsResponse(**controls, updatedAt=updated_at)
+
+
+@router.patch("/admin/booking-controls", response_model=BookingControlsResponse)
+def admin_update_booking_controls(req: BookingControlsUpdateRequest, admin: str = Depends(get_current_admin)):
+    update: dict[str, Any] = {}
+    data = req.model_dump(exclude_unset=True)
+    for key in ("jetSkiBookingsEnabled", "boatRideBookingsEnabled", "fishingChartersBookingsEnabled"):
+        if key in data and data[key] is not None:
+            update[key] = bool(data[key])
+
+    if not update:
+        controls, updated_at = _load_booking_controls()
+        return BookingControlsResponse(**controls, updatedAt=updated_at)
+
+    now = datetime.utcnow()
+    try:
+        db = get_db()
+        db.site_settings.update_one(
+            {"key": "booking_controls"},
+            {
+                "$set": {**update, "updatedAt": now, "updatedBy": admin},
+                "$setOnInsert": {"key": "booking_controls", "createdAt": now},
+            },
+            upsert=True,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to update booking controls: {e}")
+
+    controls, updated_at = _load_booking_controls()
+    return BookingControlsResponse(**controls, updatedAt=updated_at)
+
+
 # --- Booking helpers ---
 
 
@@ -206,6 +283,7 @@ def contact(req: ContactRequest):
     is_boat = str(req.type or "").strip().lower() == "boat-ride"
 
     if is_boat:
+        _require_enabled("boatRideBookingsEnabled", "Boat ride bookings are currently closed")
         to_address = req.targetEmail or BOAT_RIDE_EMAIL
         subject = req.subject or "Boat ride request"
         body_html = format_boat_ride_email(data)
@@ -324,6 +402,7 @@ def admin_list_interim_skipper_quiz(
 
 @router.post("/bookings", response_model=BookingResponse)
 def bookings(req: BookingRequest):
+    _require_enabled("jetSkiBookingsEnabled", "Jet ski bookings are currently closed")
     if not settings.email_to:
         raise HTTPException(status_code=500, detail="Email recipient not configured")
     # Send booking request email to admin; Reply-To to user
@@ -379,6 +458,7 @@ def _parse_time_str_to_minutes(s: Any) -> Optional[int]:
 
 @router.get("/timeslots", response_model=TimeslotAvailabilityResponse)
 def timeslots(rideId: str, date: str):
+    _require_enabled("jetSkiBookingsEnabled", "Jet ski bookings are currently closed")
     if not rideId or not date:
         raise HTTPException(status_code=400, detail="rideId and date are required")
     # Basic date validation (expects YYYY-MM-DD)
@@ -974,6 +1054,7 @@ def get_indemnities_for_booking(booking_id: str, admin: str = Depends(get_curren
 
 @router.post("/payments/charge", response_model=ChargeResponse)
 def payments_charge(req: ChargeBookingRequest):
+    _require_enabled("jetSkiBookingsEnabled", "Jet ski bookings are currently closed")
     # Compute authoritative amount server-side
     amount = compute_amount_cents(req.booking.rideId, req.booking.addons.model_dump())
     try:
@@ -1019,6 +1100,7 @@ def payments_charge(req: ChargeBookingRequest):
 
 @router.post("/payments/quote", response_model=PaymentQuoteResponse)
 def payments_quote(req: PaymentQuoteRequest):
+    _require_enabled("jetSkiBookingsEnabled", "Jet ski bookings are currently closed")
     amount = compute_amount_cents(req.rideId, req.addons.model_dump())
     return PaymentQuoteResponse(amountInCents=amount)
 
@@ -1032,6 +1114,7 @@ def payments_config():
 
 @router.post("/payments/initiate")
 def payments_initiate(req: ChargeBookingRequest):
+    _require_enabled("jetSkiBookingsEnabled", "Jet ski bookings are currently closed")
     # Accepts booking + placeholder token ignored; returns authoritative payment info for the UI
     amount = compute_amount_cents(req.booking.rideId, req.booking.addons.model_dump())
     if not settings.yoco_public_key:
@@ -1261,6 +1344,7 @@ def _persist_booking_and_notify(booking: dict, amount: int, charge_id: str, stat
 
 @router.post("/payments/checkout")
 def payments_checkout(req: ChargeBookingRequest):
+    _require_enabled("jetSkiBookingsEnabled", "Jet ski bookings are currently closed")
     # Build a hosted checkout session via Yoco Checkout API
     amount = compute_amount_cents(req.booking.rideId, req.booking.addons.model_dump())
     token = settings.yoco_checkout_token or settings.yoco_secret_key
@@ -1386,6 +1470,7 @@ def payments_verify_checkout(req: VerifyCheckoutRequest):
 
 @router.post("/payments/link")
 def payments_link(req: ChargeBookingRequest):
+    _require_enabled("jetSkiBookingsEnabled", "Jet ski bookings are currently closed")
     # Create a hosted Yoco Payment Link for this booking
     amount = compute_amount_cents(req.booking.rideId, req.booking.addons.model_dump())
     if not settings.yoco_client_id or not settings.yoco_client_secret:

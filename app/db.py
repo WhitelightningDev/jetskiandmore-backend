@@ -62,6 +62,8 @@ def get_db():
 def _init_indexes(client: MongoClient):
     db_name = (settings.model_dump().get('mongodb_db') or 'jetskiandmore').strip() or 'jetskiandmore'
     db = client[db_name]
+    # Site settings (feature flags / toggles)
+    db.site_settings.create_index([('key', ASCENDING)], unique=True, name='uniq_site_settings_key')
     # Timeslots: unique key on ride/date/time, TTL on holdUntil
     db.timeslots.create_index([('key', ASCENDING)], unique=True, name='uniq_slot_key')
     db.timeslots.create_index('holdUntil', expireAfterSeconds=0, name='ttl_hold_until')
