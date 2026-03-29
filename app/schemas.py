@@ -355,3 +355,88 @@ class InterimSkipperQuizAdminResponse(BaseModel):
     hasAcceptedIndemnity: bool
     quizAnswers: Dict[str, Any]
     createdAt: Optional[datetime] = None
+
+
+# --- Admin marketing / campaigns ---
+
+
+class MarketingAudience(BaseModel):
+    rideId: Optional[str] = None
+    status: Optional[str] = None
+    lastNDays: Optional[int] = None
+
+
+class MarketingCampaignCreateRequest(BaseModel):
+    name: str
+    subject: str
+    preheader: Optional[str] = None
+    content: Optional[str] = None
+    ctaLabel: Optional[str] = None
+    ctaUrl: Optional[str] = None
+    audience: Optional[MarketingAudience] = None
+    html: Optional[str] = None
+
+
+class MarketingCampaignUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    subject: Optional[str] = None
+    preheader: Optional[str] = None
+    content: Optional[str] = None
+    ctaLabel: Optional[str] = None
+    ctaUrl: Optional[str] = None
+    audience: Optional[MarketingAudience] = None
+    html: Optional[str] = None
+
+
+class MarketingCampaignStats(BaseModel):
+    attempted: int = 0
+    sent: int = 0
+    failed: int = 0
+
+
+class MarketingCampaignResponse(BaseModel):
+    id: str
+    name: str
+    subject: str
+    preheader: Optional[str] = None
+    content: Optional[str] = None
+    ctaLabel: Optional[str] = None
+    ctaUrl: Optional[str] = None
+    audience: Optional[MarketingAudience] = None
+    html: Optional[str] = None
+    status: str = "draft"
+    createdAt: Optional[datetime] = None
+    updatedAt: Optional[datetime] = None
+    sentAt: Optional[datetime] = None
+    stats: Optional[MarketingCampaignStats] = None
+
+
+class MarketingCampaignListResponse(BaseModel):
+    items: List[MarketingCampaignResponse] = []
+
+
+class MarketingRecipientsExportRequest(BaseModel):
+    rideId: Optional[str] = None
+    status: Optional[str] = None
+    lastNDays: Optional[int] = None
+
+
+class MarketingRecipientsExportResponse(BaseModel):
+    emails: List[str] = []
+
+
+class MarketingRecipientsPreviewResponse(BaseModel):
+    count: int
+    sample: List[str] = []
+
+
+class MarketingSendTestRequest(BaseModel):
+    toEmail: EmailStr
+
+
+class MarketingAudienceSummaryResponse(BaseModel):
+    totalUniqueEmails: int
+    uniqueEmailsLast30Days: int
+    uniqueEmailsLast90Days: int
+    byRide: List[CountStat] = []
+    topDomains: List[CountStat] = []

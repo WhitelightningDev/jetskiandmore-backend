@@ -93,6 +93,10 @@ def _init_indexes(client: MongoClient):
     db.page_views.create_index([('visitor_id', ASCENDING)], name='idx_page_views_visitor')
     db.page_views.create_index([('country', ASCENDING)], name='idx_page_views_country')
     db.page_views.create_index([('device_type', ASCENDING)], name='idx_page_views_device')
+    # Marketing campaigns
+    db.marketing_campaigns.create_index([('status', ASCENDING)], name='idx_campaign_status')
+    db.marketing_campaigns.create_index([('createdAt', ASCENDING)], name='idx_campaign_created_at')
+    db.marketing_campaigns.create_index([('updatedAt', ASCENDING)], name='idx_campaign_updated_at')
 
 
 def slot_key(ride_id: str, date: str | None, time_str: str | None) -> str:

@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 import secrets
 import string
+import time
 
 import httpx
 import re
@@ -61,6 +62,16 @@ from .schemas import (
     PageViewBreakdowns,
     TimeOfDayStat,
     ReturningStat,
+    MarketingAudience,
+    MarketingCampaignCreateRequest,
+    MarketingCampaignUpdateRequest,
+    MarketingCampaignResponse,
+    MarketingCampaignListResponse,
+    MarketingRecipientsExportRequest,
+    MarketingRecipientsExportResponse,
+    MarketingRecipientsPreviewResponse,
+    MarketingSendTestRequest,
+    MarketingAudienceSummaryResponse,
 )
 from .yoco import YocoError, _get_oauth_token, create_charge
 import uuid
@@ -843,15 +854,25 @@ def admin_page_view_analytics(
             res = []
         return [CountStat(key=str(r.get("_id") or ""), count=int(r.get("count") or 0)) for r in res]
 
-    # Time of day (hour of day, 0-23)
+    # Time of day (hour of day, 0-23) in local time (SAST)
     tod_pipeline: list[dict] = []
     if match_filter:
         tod_pipeline.append({"$match": match_filter})
     tod_pipeline.extend(
         [
             {
+                "$addFields": {
+                    "_local_parts": {
+                        "$dateToParts": {
+                            "date": "$created_at",
+                            "timezone": "Africa/Johannesburg",
+                        }
+                    }
+                }
+            },
+            {
                 "$group": {
-                    "_id": {"$hour": "$created_at"},
+                    "_id": "$_local_parts.hour",
                     "views": {"$sum": 1},
                 }
             },
@@ -934,6 +955,282 @@ def admin_login(payload: AdminLoginRequest):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     token = _create_admin_token(subject=settings.admin_email)
     return AdminLoginResponse(token=token)
+
+
+# --- Admin marketing / campaigns ---
+
+
+EMAIL_RE = re.compile(r"^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$")
+
+
+def _serialize_campaign(doc: Dict[str, Any]) -> MarketingCampaignResponse:
+    stats = doc.get("stats") or None
+    return MarketingCampaignResponse(
+        id=str(doc.get("_id")),
+        name=str(doc.get("name") or ""),
+        subject=str(doc.get("subject") or ""),
+        preheader=doc.get("preheader"),
+        content=doc.get("content"),
+        ctaLabel=doc.get("ctaLabel"),
+        ctaUrl=doc.get("ctaUrl"),
+        audience=MarketingAudience(**(doc.get("audience") or {})) if doc.get("audience") else None,
+        html=doc.get("html"),
+        status=str(doc.get("status") or "draft"),
+        createdAt=doc.get("createdAt"),
+        updatedAt=doc.get("updatedAt"),
+        sentAt=doc.get("sentAt"),
+        stats=stats,
+    )
+
+
+def _build_recipients(audience: Optional[Dict[str, Any]] = None) -> list[str]:
+    db = get_db()
+    aud = audience or {}
+    ride_id = str(aud.get("rideId") or "").strip() or None
+    status_filter = str(aud.get("status") or "").strip() or None
+    last_n_days = aud.get("lastNDays")
+    try:
+        last_n_days_int = int(last_n_days) if last_n_days is not None else None
+    except Exception:
+        last_n_days_int = None
+
+    query: Dict[str, Any] = {}
+    if ride_id:
+        query["rideId"] = ride_id
+    if status_filter:
+        query["status"] = status_filter
+    if last_n_days_int and last_n_days_int > 0:
+        query["createdAt"] = {"$gte": datetime.utcnow() - timedelta(days=last_n_days_int)}
+
+    cursor = db.bookings.find(query, {"email": 1}).limit(20000)
+    out: list[str] = []
+    seen: set[str] = set()
+    for doc in cursor:
+        email = str(doc.get("email") or "").strip().lower()
+        if not email or not EMAIL_RE.match(email):
+            continue
+        if email in seen:
+            continue
+        seen.add(email)
+        out.append(email)
+    return out
+
+
+@router.get("/admin/marketing/campaigns", response_model=MarketingCampaignListResponse)
+def admin_list_campaigns(limit: int = 50, admin: str = Depends(get_current_admin)):
+    db = get_db()
+    limit_val = max(1, min(int(limit or 50), 200))
+    docs = list(db.marketing_campaigns.find({}).sort("updatedAt", -1).limit(limit_val))
+    return MarketingCampaignListResponse(items=[_serialize_campaign(d) for d in docs])
+
+
+@router.post("/admin/marketing/campaigns", response_model=MarketingCampaignResponse)
+def admin_create_campaign(payload: MarketingCampaignCreateRequest, admin: str = Depends(get_current_admin)):
+    db = get_db()
+    now = datetime.utcnow()
+    doc = payload.model_dump()
+    doc["status"] = "draft"
+    doc["createdAt"] = now
+    doc["updatedAt"] = now
+    doc["createdBy"] = admin
+    res = db.marketing_campaigns.insert_one(doc)
+    saved = db.marketing_campaigns.find_one({"_id": res.inserted_id})
+    return _serialize_campaign(saved or {**doc, "_id": res.inserted_id})
+
+
+@router.put("/admin/marketing/campaigns/{campaign_id}", response_model=MarketingCampaignResponse)
+def admin_update_campaign(
+    campaign_id: str,
+    payload: MarketingCampaignUpdateRequest,
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    try:
+        oid = ObjectId(campaign_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    updates = payload.model_dump(exclude_unset=True)
+    if not updates:
+        doc = db.marketing_campaigns.find_one({"_id": oid})
+        if not doc:
+            raise HTTPException(status_code=404, detail="Campaign not found")
+        return _serialize_campaign(doc)
+    updates["updatedAt"] = datetime.utcnow()
+    updates["updatedBy"] = admin
+    res = db.marketing_campaigns.update_one({"_id": oid}, {"$set": updates})
+    if res.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    doc = db.marketing_campaigns.find_one({"_id": oid})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    return _serialize_campaign(doc)
+
+
+@router.delete("/admin/marketing/campaigns/{campaign_id}")
+def admin_delete_campaign(campaign_id: str, admin: str = Depends(get_current_admin)):
+    db = get_db()
+    try:
+        oid = ObjectId(campaign_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    res = db.marketing_campaigns.delete_one({"_id": oid})
+    if res.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    return {"ok": True}
+
+
+@router.get("/admin/marketing/campaigns/{campaign_id}/recipients-preview", response_model=MarketingRecipientsPreviewResponse)
+def admin_campaign_recipients_preview(campaign_id: str, admin: str = Depends(get_current_admin)):
+    db = get_db()
+    try:
+        oid = ObjectId(campaign_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    campaign = db.marketing_campaigns.find_one({"_id": oid})
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    recipients = _build_recipients(campaign.get("audience") or None)
+    return MarketingRecipientsPreviewResponse(count=len(recipients), sample=recipients[:10])
+
+
+@router.post("/admin/marketing/campaigns/{campaign_id}/send-test")
+def admin_send_test_campaign(
+    campaign_id: str,
+    payload: MarketingSendTestRequest,
+    admin: str = Depends(get_current_admin),
+):
+    db = get_db()
+    try:
+        oid = ObjectId(campaign_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    campaign = db.marketing_campaigns.find_one({"_id": oid})
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    subject = str(campaign.get("subject") or campaign.get("name") or "Jet Ski & More").strip()
+    html = campaign.get("html") or campaign.get("content") or ""
+    try:
+        ok = send_email(subject=subject, body=str(html), body_html=str(html), to_address=str(payload.toEmail))
+        if not ok:
+            raise RuntimeError("SMTP send returned False")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Email send failed: {e}")
+    return {"ok": True}
+
+
+@router.post("/admin/marketing/campaigns/{campaign_id}/send", response_model=MarketingCampaignResponse)
+def admin_send_campaign(campaign_id: str, admin: str = Depends(get_current_admin)):
+    db = get_db()
+    try:
+        oid = ObjectId(campaign_id)
+    except Exception:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    campaign = db.marketing_campaigns.find_one({"_id": oid})
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+    if str(campaign.get("status") or "draft") == "sent":
+        return _serialize_campaign(campaign)
+
+    recipients = _build_recipients(campaign.get("audience") or None)
+    if len(recipients) == 0:
+        raise HTTPException(status_code=400, detail="No recipients for this audience filter")
+
+    subject = str(campaign.get("subject") or campaign.get("name") or "Jet Ski & More").strip()
+    html = str(campaign.get("html") or campaign.get("content") or "").strip()
+    if not html:
+        raise HTTPException(status_code=400, detail="Campaign has no content")
+
+    max_recipients = 300
+    if len(recipients) > max_recipients:
+        recipients = recipients[:max_recipients]
+
+    attempted = 0
+    sent = 0
+    failed = 0
+    for email in recipients:
+        attempted += 1
+        try:
+            ok = send_email(subject=subject, body=html, body_html=html, to_address=email)
+            if ok:
+                sent += 1
+            else:
+                failed += 1
+        except Exception:
+            failed += 1
+        time.sleep(0.2)
+
+    now = datetime.utcnow()
+    db.marketing_campaigns.update_one(
+        {"_id": oid},
+        {
+            "$set": {
+                "status": "sent",
+                "sentAt": now,
+                "updatedAt": now,
+                "updatedBy": admin,
+                "stats": {"attempted": attempted, "sent": sent, "failed": failed},
+            }
+        },
+    )
+    updated = db.marketing_campaigns.find_one({"_id": oid}) or campaign
+    return _serialize_campaign(updated)
+
+
+@router.get("/admin/marketing/audience/summary", response_model=MarketingAudienceSummaryResponse)
+def admin_marketing_audience_summary(admin: str = Depends(get_current_admin)):
+    db = get_db()
+    docs = list(db.bookings.find({}, {"email": 1, "rideId": 1, "createdAt": 1}).limit(50000))
+    now = datetime.utcnow()
+    cutoff30 = now - timedelta(days=30)
+    cutoff90 = now - timedelta(days=90)
+    seen: set[str] = set()
+    seen30: set[str] = set()
+    seen90: set[str] = set()
+    by_ride: dict[str, set[str]] = {}
+    domains: dict[str, int] = {}
+
+    for d in docs:
+        email = str(d.get("email") or "").strip().lower()
+        if not email or not EMAIL_RE.match(email):
+            continue
+        ride_id = str(d.get("rideId") or "").strip() or "unknown"
+        by_ride.setdefault(ride_id, set()).add(email)
+        domain = email.split("@")[-1] if "@" in email else ""
+        if domain:
+            domains[domain] = domains.get(domain, 0) + 1
+
+        seen.add(email)
+        created = d.get("createdAt")
+        if created and isinstance(created, datetime):
+            if created >= cutoff90:
+                seen90.add(email)
+            if created >= cutoff30:
+                seen30.add(email)
+
+    by_ride_stats = sorted(
+        [CountStat(key=k, count=len(v)) for k, v in by_ride.items()],
+        key=lambda x: x.count,
+        reverse=True,
+    )[:20]
+    top_domains = sorted(
+        [CountStat(key=k, count=v) for k, v in domains.items()],
+        key=lambda x: x.count,
+        reverse=True,
+    )[:12]
+
+    return MarketingAudienceSummaryResponse(
+        totalUniqueEmails=len(seen),
+        uniqueEmailsLast30Days=len(seen30),
+        uniqueEmailsLast90Days=len(seen90),
+        byRide=by_ride_stats,
+        topDomains=top_domains,
+    )
+
+
+@router.post("/admin/marketing/recipients/export", response_model=MarketingRecipientsExportResponse)
+def admin_export_recipients(payload: MarketingRecipientsExportRequest, admin: str = Depends(get_current_admin)):
+    emails = _build_recipients(payload.model_dump(exclude_unset=True))
+    return MarketingRecipientsExportResponse(emails=emails)
 
 
 @router.post("/metrics/pageview")
