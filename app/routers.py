@@ -32,6 +32,7 @@ from .emailer import (
 )
 from .pricing import compute_amount_cents
 from .marketing_advisor import send_advisor_email
+from .partner_pack_pdf import generate_partner_pack_pdf
 from .schemas import (
     AnalyticsSummaryResponse,
     AdminLoginRequest,
@@ -280,6 +281,27 @@ def admin_update_booking_controls(req: BookingControlsUpdateRequest, admin: str 
 
     controls, updated_at = _load_booking_controls()
     return BookingControlsResponse(**controls, updatedAt=updated_at)
+
+
+# --- Public partner pack PDF (brochure) ---
+
+
+@router.get("/partner-pack.pdf")
+def partner_pack_pdf(partnerCode: Optional[str] = None, property: Optional[str] = None):
+    pdf = generate_partner_pack_pdf(
+        site_base_url=(settings.site_base_url or "https://www.jetskiandmore.com"),
+        partner_code=partnerCode,
+        property_name=property,
+        commission_percent=20,
+    )
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'attachment; filename="jet-ski-and-more-partner-pack.pdf"',
+            "Cache-Control": "no-store",
+        },
+    )
 
 
 # --- Booking helpers ---
