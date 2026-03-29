@@ -1900,6 +1900,9 @@ def admin_marketing_insights(
     loc = (location or "South Africa (Africa/Johannesburg)").strip()
     lb = max(14, min(int(lookbackDays or 180), 730))
 
+    booking_controls, _ = _load_booking_controls()
+    jet_ski_open = bool(booking_controls.get("jetSkiBookingsEnabled"))
+
     cutoff = datetime.utcnow() - timedelta(days=lb)
     bookings = list(
         db.bookings.find(
@@ -1935,13 +1938,23 @@ def admin_marketing_insights(
     today_local = datetime.now(_SAST).date()
     holidays = _upcoming_sa_holidays(today_local, days=140)
 
-    what_to_send = [
-        "Weather-aware availability updates (clear cancellation/reschedule policy)",
-        "Limited-slot reminders for weekends and public holidays",
-        "Family/group bundles (e.g., 2–5 jet-skis) with simple pricing",
-        "Gift voucher / birthday experience messaging",
-        "UGC requests: ask for photos/reviews after a successful ride",
-    ]
+    what_to_send = (
+        [
+            "Winter/off-season updates (what’s changing and what you’re improving)",
+            "Safety & compliance credibility content (briefings, onboarding, procedures)",
+            "Gift vouchers / early-access list for spring/summer",
+            "Partner-facing updates (tourism desks, hotels, corporate planners)",
+            "UGC requests (reviews/photos) from past riders to keep visibility",
+        ]
+        if not jet_ski_open
+        else [
+            "Weather-aware availability updates (clear cancellation/reschedule policy)",
+            "Limited-slot reminders for weekends and public holidays",
+            "Family/group bundles (e.g., 2–5 jet-skis) with simple pricing",
+            "Gift voucher / birthday experience messaging",
+            "UGC requests: ask for photos/reviews after a successful ride",
+        ]
+    )
     what_not_to_send = [
         "Deep discounts without a clear limit (can erode premium perception)",
         "Late-night sends (after 20:00) or very early sends (before 07:00)",
@@ -1950,12 +1963,13 @@ def admin_marketing_insights(
     ]
 
     base_url = _site_base()
-    booking_url = f"{base_url}/book"
+    booking_url = f"{base_url}/book" if jet_ski_open else f"{base_url}/contact"
+    booking_cta = "View availability" if jet_ski_open else "Join early access"
     top_ride_ids = [k for k, _ in sorted(ride_counts.items(), key=lambda x: x[1], reverse=True)[:3]]
     ride_hint = ", ".join(top_ride_ids) if top_ride_ids else "your preferred ride"
 
     ideas: list[CampaignIdea] = []
-    if holidays:
+    if holidays and jet_ski_open:
         h0 = holidays[0]
         ideas.append(
             CampaignIdea(
@@ -1973,6 +1987,23 @@ def admin_marketing_insights(
                 audience=MarketingAudience(lastNDays=365),
             )
         )
+    elif holidays and not jet_ski_open:
+        h0 = holidays[0]
+        ideas.append(
+            CampaignIdea(
+                title=f"{h0.name} — Vouchers / early access",
+                subject=f"{h0.name}: plan ahead for spring/summer",
+                preheader="Join early access or grab a voucher for the season ahead.",
+                content=(
+                    f"Hi there,\n\n{h0.name} is coming up on {h0.date}. Even in the off-season, you can still plan ahead.\n\n"
+                    "Join our early-access list for spring/summer openings, or request a voucher for birthdays and group experiences.\n\n"
+                    "Reply to this email with your preferred month and group size and we’ll prioritise you when scheduling opens."
+                ),
+                ctaLabel=booking_cta,
+                ctaUrl=booking_url,
+                audience=MarketingAudience(lastNDays=730),
+            )
+        )
 
     ideas.append(
         CampaignIdea(
@@ -1987,43 +2018,81 @@ def admin_marketing_insights(
                 "while keeping safety as the priority.\n\n"
                 "If you’d like to try again, we’d love to have you on the water."
             ),
-            ctaLabel="View availability",
+            ctaLabel=booking_cta,
             ctaUrl=booking_url,
             audience=MarketingAudience(lastNDays=730),
         )
     )
-    ideas.append(
-        CampaignIdea(
-            title="Weekend sell-out reminder",
-            subject="Weekend rides fill fast — book early",
-            preheader="Grab the best times before they’re gone.",
-            content=(
-                "Hi there,\n\n"
-                "Our weekend time slots can sell out quickly—especially the late morning and early afternoon.\n\n"
-                f"If you’re looking at {ride_hint}, we recommend booking ahead to secure your preferred time.\n\n"
-                "Book online in minutes."
-            ),
-            ctaLabel="Book online",
-            ctaUrl=booking_url,
-            audience=MarketingAudience(lastNDays=365),
+    if jet_ski_open:
+        ideas.append(
+            CampaignIdea(
+                title="Weekend sell-out reminder",
+                subject="Weekend rides fill fast — book early",
+                preheader="Grab the best times before they’re gone.",
+                content=(
+                    "Hi there,\n\n"
+                    "Our weekend time slots can sell out quickly—especially the late morning and early afternoon.\n\n"
+                    f"If you’re looking at {ride_hint}, we recommend booking ahead to secure your preferred time.\n\n"
+                    "Book online in minutes."
+                ),
+                ctaLabel="Book online",
+                ctaUrl=booking_url,
+                audience=MarketingAudience(lastNDays=365),
+            )
         )
-    )
-    ideas.append(
-        CampaignIdea(
-            title="Midweek calm-seas special",
-            subject="Midweek on the water — quieter, easier to book",
-            preheader="If your schedule is flexible, midweek has great availability.",
-            content=(
-                "Hi there,\n\n"
-                "If you can go midweek, you’ll often find more availability and a calmer, more relaxed experience.\n\n"
-                "Choose your ride time and we’ll take you through our structured customer briefing and onboarding.\n\n"
-                "Check availability and pick a slot that works for you."
-            ),
-            ctaLabel="Check availability",
-            ctaUrl=booking_url,
-            audience=MarketingAudience(lastNDays=365),
+        ideas.append(
+            CampaignIdea(
+                title="Midweek calm-seas special",
+                subject="Midweek on the water — quieter, easier to book",
+                preheader="If your schedule is flexible, midweek has great availability.",
+                content=(
+                    "Hi there,\n\n"
+                    "If you can go midweek, you’ll often find more availability and a calmer, more relaxed experience.\n\n"
+                    "Choose your ride time and we’ll take you through our structured customer briefing and onboarding.\n\n"
+                    "Check availability and pick a slot that works for you."
+                ),
+                ctaLabel="Check availability",
+                ctaUrl=booking_url,
+                audience=MarketingAudience(lastNDays=365),
+            )
         )
-    )
+    else:
+        ideas.append(
+            CampaignIdea(
+                title="Winter operations update",
+                subject="Winter update: improvements underway + safety-led scheduling",
+                preheader="We’re preparing for summer while keeping safety the priority.",
+                content=(
+                    "Hi there,\n\n"
+                    "We’re in our off-season and using this time to prepare for the next season — maintenance, checks, and operational improvements.\n\n"
+                    "When weather and sea conditions allow, we’ll open limited windows for sessions. Safety remains the priority.\n\n"
+                    "If you’d like first notice when the next openings go live, join our early-access list."
+                ),
+                ctaLabel=booking_cta,
+                ctaUrl=booking_url,
+                audience=MarketingAudience(lastNDays=730),
+            )
+        )
+        ideas.append(
+            CampaignIdea(
+                title="Safety & compliance credibility",
+                subject="How our rides are run (briefing, onboarding, safety requirements)",
+                preheader="Factual overview for customers and partners.",
+                content=(
+                    "Hi there,\n\n"
+                    "A quick note on how Jet Ski & More runs sessions:\n"
+                    "• Structured customer briefing process\n"
+                    "• Ride onboarding steps and operating procedures\n"
+                    "• Swim competency requirement (where applicable)\n"
+                    "• Safety equipment provided and mandatory life jackets\n"
+                    "• Weather and sea-condition rules\n\n"
+                    "We operate with procedures designed around commercial safety requirements."
+                ),
+                ctaLabel="View safety guide",
+                ctaUrl=f"{base_url}/safety",
+                audience=MarketingAudience(lastNDays=730),
+            )
+        )
 
     return MarketingInsightsResponse(
         industry=ind,

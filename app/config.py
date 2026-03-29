@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     marketing_advisor_lookback_days: int = 365
     marketing_advisor_industry: str = "Jet ski rentals & water activities"
     marketing_advisor_location: str = "South Africa (Africa/Johannesburg)"
+    marketing_advisor_mode: str = "auto"  # auto | winter_ramp | spring_ramp | summer_peak
 
     class Config:
         env_file = ".env"
