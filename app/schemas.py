@@ -393,6 +393,13 @@ class MarketingCampaignStats(BaseModel):
     attempted: int = 0
     sent: int = 0
     failed: int = 0
+    totalRecipients: Optional[int] = None
+    remainingRecipients: Optional[int] = None
+    batchOffset: Optional[int] = None
+    batchSize: Optional[int] = None
+    lastBatchAttempted: Optional[int] = None
+    lastBatchSent: Optional[int] = None
+    lastBatchFailed: Optional[int] = None
 
 
 class MarketingCampaignResponse(BaseModel):

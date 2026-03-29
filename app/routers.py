@@ -1191,7 +1191,11 @@ def _build_recipients(audience: Optional[Dict[str, Any]] = None) -> list[str]:
                 out.append(email)
         except Exception:
             pass
-    return out
+    # Stable ordering makes batching deterministic
+    try:
+        return sorted(out)
+    except Exception:
+        return out
 
 
 @router.get("/admin/marketing/campaigns", response_model=MarketingCampaignListResponse)
@@ -1324,7 +1328,12 @@ def admin_send_test_campaign(
 
 
 @router.post("/admin/marketing/campaigns/{campaign_id}/send", response_model=MarketingCampaignResponse)
-def admin_send_campaign(campaign_id: str, admin: str = Depends(get_current_admin)):
+def admin_send_campaign(
+    campaign_id: str,
+    offset: Optional[int] = None,
+    batchSize: int = 300,
+    admin: str = Depends(get_current_admin),
+):
     db = get_db()
     try:
         oid = ObjectId(campaign_id)
@@ -1333,11 +1342,10 @@ def admin_send_campaign(campaign_id: str, admin: str = Depends(get_current_admin
     campaign = db.marketing_campaigns.find_one({"_id": oid})
     if not campaign:
         raise HTTPException(status_code=404, detail="Campaign not found")
-    if str(campaign.get("status") or "draft") == "sent":
-        return _serialize_campaign(campaign)
 
     recipients = _build_recipients(campaign.get("audience") or None)
-    if len(recipients) == 0:
+    total_recipients = len(recipients)
+    if total_recipients == 0:
         raise HTTPException(status_code=400, detail="No recipients for this audience filter")
 
     subject = str(campaign.get("subject") or campaign.get("name") or "Jet Ski & More").strip()
@@ -1346,16 +1354,74 @@ def admin_send_campaign(campaign_id: str, admin: str = Depends(get_current_admin
         raise HTTPException(status_code=400, detail="Campaign has no content")
     html_to_send, inline_images = _prepare_inline_assets(html)
 
-    max_recipients = 300
-    if len(recipients) > max_recipients:
-        recipients = recipients[:max_recipients]
+    max_batch = 300
+    try:
+        batch_size = int(batchSize or max_batch)
+    except Exception:
+        batch_size = max_batch
+    batch_size = max(1, min(batch_size, max_batch))
+
+    prev_offset = 0
+    try:
+        prev_offset = int(campaign.get("sendOffset") or 0)
+    except Exception:
+        prev_offset = 0
+    if prev_offset <= 0:
+        # Backwards compat: older sends didn't track a cursor; use attempted as a best-effort cursor.
+        try:
+            st = campaign.get("stats") or {}
+            attempted_prev = int(st.get("attempted") or 0)
+            if attempted_prev > 0 and str(campaign.get("status") or "").strip().lower() in ("sent", "sending"):
+                prev_offset = attempted_prev
+        except Exception:
+            pass
+
+    if offset is None:
+        offset_val = prev_offset
+    else:
+        try:
+            offset_val = max(0, int(offset))
+        except Exception:
+            offset_val = prev_offset
+
+    # Avoid accidental duplicate sends if the UI is stale.
+    if offset_val != prev_offset:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Batch cursor mismatch. Refresh and try again. Expected offset {prev_offset}.",
+        )
+
+    if offset_val >= total_recipients:
+        # Nothing left to send
+        now = datetime.utcnow()
+        stats_prev = campaign.get("stats") or {}
+        stats = {
+            "attempted": int(stats_prev.get("attempted") or 0),
+            "sent": int(stats_prev.get("sent") or 0),
+            "failed": int(stats_prev.get("failed") or 0),
+            "totalRecipients": total_recipients,
+            "remainingRecipients": 0,
+            "batchOffset": offset_val,
+            "batchSize": 0,
+            "lastBatchAttempted": 0,
+            "lastBatchSent": 0,
+            "lastBatchFailed": 0,
+        }
+        db.marketing_campaigns.update_one(
+            {"_id": oid},
+            {"$set": {"status": "sent", "sentAt": campaign.get("sentAt") or now, "updatedAt": now, "updatedBy": admin, "stats": stats, "sendOffset": offset_val}},
+        )
+        updated = db.marketing_campaigns.find_one({"_id": oid}) or campaign
+        return _serialize_campaign(updated)
+
+    batch = recipients[offset_val : offset_val + batch_size]
 
     attempted = 0
     sent = 0
     failed = 0
     run_id = uuid.uuid4().hex
     event_docs: list[dict[str, Any]] = []
-    for email in recipients:
+    for email in batch:
         attempted += 1
         sent_at = datetime.utcnow()
         try:
@@ -1420,15 +1486,37 @@ def admin_send_campaign(campaign_id: str, admin: str = Depends(get_current_admin
         pass
 
     now = datetime.utcnow()
+    next_offset = offset_val + len(batch)
+    remaining = max(0, total_recipients - next_offset)
+
+    prev_stats = campaign.get("stats") or {}
+    total_attempted = int(prev_stats.get("attempted") or 0) + attempted
+    total_sent = int(prev_stats.get("sent") or 0) + sent
+    total_failed = int(prev_stats.get("failed") or 0) + failed
+    status_val = "sent" if remaining == 0 else "sending"
+    sent_at_val = now if status_val == "sent" else campaign.get("sentAt")
+
     db.marketing_campaigns.update_one(
         {"_id": oid},
         {
             "$set": {
-                "status": "sent",
-                "sentAt": now,
+                "status": status_val,
+                "sentAt": sent_at_val,
                 "updatedAt": now,
                 "updatedBy": admin,
-                "stats": {"attempted": attempted, "sent": sent, "failed": failed},
+                "stats": {
+                    "attempted": total_attempted,
+                    "sent": total_sent,
+                    "failed": total_failed,
+                    "totalRecipients": total_recipients,
+                    "remainingRecipients": remaining,
+                    "batchOffset": offset_val,
+                    "batchSize": len(batch),
+                    "lastBatchAttempted": attempted,
+                    "lastBatchSent": sent,
+                    "lastBatchFailed": failed,
+                },
+                "sendOffset": next_offset,
             }
         },
     )
